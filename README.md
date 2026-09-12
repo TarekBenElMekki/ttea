@@ -14,6 +14,8 @@ Read-only persisted-state analysis is documented in [RECOVERY.md](RECOVERY.md).
 
 Deterministic action classification and approval workflow primitives are documented in [EXECUTION_POLICY.md](EXECUTION_POLICY.md).
 
+Local passive measurement is documented in [HARDWARE_TELEMETRY.md](HARDWARE_TELEMETRY.md).
+
 ## Setup
 
 Create the local environment and activate it in Windows PowerShell:
