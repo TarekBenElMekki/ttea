@@ -15,3 +15,5 @@ dist/
 !.env.example
 logs/*
 !logs/.gitkeep
+data/*
+!data/.gitkeep

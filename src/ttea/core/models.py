@@ -21,16 +21,16 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _serialize(value: Any) -> Any:
+def to_json_compatible(value: Any) -> Any:
     """Convert supported domain values into standard serializable values."""
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, list):
-        return [_serialize(item) for item in value]
+        return [to_json_compatible(item) for item in value]
     if isinstance(value, dict):
-        return {str(key): _serialize(item) for key, item in value.items()}
+        return {str(key): to_json_compatible(item) for key, item in value.items()}
     return value
 
 
@@ -38,7 +38,7 @@ class SerializableModel:
     """Provide one predictable dictionary representation for core models."""
 
     def to_dict(self) -> dict[str, Any]:
-        return _serialize(asdict(self))
+        return to_json_compatible(asdict(self))
 
 
 def _require_nonempty(value: str, field_name: str) -> None:

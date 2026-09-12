@@ -1,5 +1,6 @@
 import logging
 import os
+from pathlib import Path
 import unittest
 
 from ttea.config import load_settings
@@ -9,18 +10,22 @@ class SettingsTests(unittest.TestCase):
     def setUp(self):
         self.previous_level = os.environ.pop("TTEA_LOG_LEVEL", None)
         self.previous_directory = os.environ.pop("TTEA_LOG_DIRECTORY", None)
+        self.previous_database_path = os.environ.pop("TTEA_DATABASE_PATH", None)
 
     def tearDown(self):
         if self.previous_level is not None:
             os.environ["TTEA_LOG_LEVEL"] = self.previous_level
         if self.previous_directory is not None:
             os.environ["TTEA_LOG_DIRECTORY"] = self.previous_directory
+        if self.previous_database_path is not None:
+            os.environ["TTEA_DATABASE_PATH"] = self.previous_database_path
 
     def test_default_settings(self):
         settings = load_settings()
 
         self.assertEqual(settings.log_level, logging.INFO)
-        self.assertEqual(str(settings.log_directory), "logs")
+        self.assertEqual(settings.log_directory, Path("logs"))
+        self.assertEqual(settings.database_path, Path("data") / "ttea.db")
 
     def test_log_level_environment_override(self):
         os.environ["TTEA_LOG_LEVEL"] = "debug"
