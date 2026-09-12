@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 from io import StringIO
+import math
 import subprocess
 
 from ttea.logging import get_logger
@@ -20,9 +21,10 @@ def _number(value: str) -> float | None:
     if not normalized or normalized.upper() in {"N/A", "[N/A]"}:
         return None
     try:
-        return float(normalized)
+        number = float(normalized)
     except ValueError:
         return None
+    return number if math.isfinite(number) else None
 
 
 class NvidiaTelemetryCollector:

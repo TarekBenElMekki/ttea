@@ -16,6 +16,8 @@ Deterministic action classification and approval workflow primitives are documen
 
 Local passive measurement is documented in [HARDWARE_TELEMETRY.md](HARDWARE_TELEMETRY.md).
 
+Deterministic workload resource decisions based on fresh telemetry are documented in [RESOURCE_MANAGEMENT.md](RESOURCE_MANAGEMENT.md).
+
 ## Setup
 
 Create the local environment and activate it in Windows PowerShell:

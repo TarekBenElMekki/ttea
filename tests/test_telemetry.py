@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from ttea.telemetry import HardwareProfile, HardwareSnapshot, HardwareTelemetryService
 from ttea.telemetry.models import CpuMetrics, DiskMetrics, GpuMetrics, GpuProfile, MemoryMetrics
-from ttea.telemetry.nvidia import MIB, NvidiaTelemetryCollector
+from ttea.telemetry.nvidia import MIB, NvidiaTelemetryCollector, _number
 from ttea.telemetry.system import CPU_SAMPLE_INTERVAL_SECONDS, cpu_temperature
 
 
@@ -125,6 +125,12 @@ class TelemetryServiceTests(unittest.TestCase):
 
 
 class NvidiaCollectorTests(unittest.TestCase):
+    def test_non_finite_values_are_unavailable(self):
+        self.assertIsNone(_number("nan"))
+        self.assertIsNone(_number("NaN"))
+        self.assertIsNone(_number("inf"))
+        self.assertIsNone(_number("-infinity"))
+
     def test_single_and_multiple_gpu_csv_parsing(self):
         output = "0, GeForce MX350, 25, 2048, 512, 1536, 62, 18.5\n1, RTX, 50, 4096, 1024, 3072, 70, 45"
         metrics = NvidiaTelemetryCollector._parse(output)
