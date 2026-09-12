@@ -9,3 +9,5 @@ The benchmark worker PID and owned Ollama server PID are separate persisted iden
 `ResourceManager` preflight runs before server startup, and `BenchmarkSupervisor` performs a second fresh preflight immediately before generation. The controlled runtime cannot grant itself permission and includes the server-side model allocation in the supervisor cleanup hierarchy. Ctrl+C before or during supervised execution triggers bounded cleanup and preserves ownership state whenever server shutdown cannot be confirmed.
 
 `python -m ttea.benchmarking --ollama-check` performs passive executable and default-loopback API discovery only. It does not launch a server, pull a model, or generate text.
+
+T/TEA resolves Ollama from an explicit configured executable, PATH, or the standard current-user Windows installation location without modifying the user's global PATH.

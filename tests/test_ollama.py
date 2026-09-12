@@ -11,8 +11,8 @@ from unittest.mock import Mock, patch
 
 import psutil
 
-from ttea.benchmarking import BenchmarkOutcome, BenchmarkResult, BenchmarkSafetyPolicy, BenchmarkStateStore, ControlledOllamaRuntime, OllamaBenchmarkWorker, OllamaClient, OllamaEndpoint, OllamaRuntimeError, OwnedOllamaServer
-from ttea.benchmarking.ollama import OllamaCleanup, OllamaServerStartResult, OwnedProcessIdentity
+from ttea.benchmarking import BenchmarkOutcome, BenchmarkResult, BenchmarkSafetyPolicy, BenchmarkStateStore, ControlledOllamaRuntime, OllamaBenchmarkWorker, OllamaClient, OllamaEndpoint, OllamaRuntimeError, OwnedOllamaServer, resolve_ollama_executable
+from ttea.benchmarking.ollama import OllamaCleanup, OllamaServerStartResult, OwnedProcessIdentity, passive_ollama_check
 from ttea.resources import ResourceDecision, ResourceRequest
 
 
@@ -112,7 +112,8 @@ class OllamaTests(unittest.TestCase):
         client.generate.assert_called_once_with("exact", "prompt")
         self.assertFalse(hasattr(worker, "pull"))
 
-    def test_owned_server_startup_success_and_timeout_cleanup(self):
+    @patch("ttea.benchmarking.ollama.resolve_ollama_executable", return_value="ollama-test")
+    def test_owned_server_startup_success_and_timeout_cleanup(self, resolver):
         popen = Mock(pid=41, returncode=None)
         popen.poll.return_value = None
         process_api = lambda pid: FakeProcess(pid, 10)
@@ -241,7 +242,8 @@ class OllamaTests(unittest.TestCase):
         fake_server.shutdown.assert_called_once()
         self.assertFalse(self.state_path.exists())
 
-    def test_identity_capture_failure_stops_exact_spawned_handle(self):
+    @patch("ttea.benchmarking.ollama.resolve_ollama_executable", return_value="ollama-test")
+    def test_identity_capture_failure_stops_exact_spawned_handle(self, resolver):
         class DirectPopen:
             pid = 42
             returncode = None
@@ -305,11 +307,12 @@ class OllamaTests(unittest.TestCase):
         self.assertIn("server_started_epoch", script)
         self.assertNotIn("-Name ollama", script)
 
-    def test_cli_fallback_uses_exact_model_and_server_environment(self):
+    @patch("ttea.benchmarking.ollama.resolve_ollama_executable", return_value="ollama-test")
+    def test_cli_fallback_uses_exact_model_and_server_environment(self, resolver):
         runner = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
         server = OwnedOllamaServer(self.endpoint, self.policy, command_runner=runner)
         server.stop_model_cli("exact:tag", 0.5)
-        self.assertEqual(runner.call_args.args[0], ["ollama", "stop", "exact:tag"])
+        self.assertEqual(runner.call_args.args[0], ["ollama-test", "stop", "exact:tag"])
         self.assertEqual(runner.call_args.kwargs["env"]["OLLAMA_HOST"], "127.0.0.1:11435")
         self.assertEqual(runner.call_args.kwargs["timeout"], 0.5)
 
@@ -341,6 +344,46 @@ class OllamaTests(unittest.TestCase):
         server.identity = OwnedProcessIdentity(1, 10)
         with self.assertRaises(OllamaRuntimeError): server.shutdown(0.01)
         self.assertIsNotNone(server.identity)
+
+    def test_resolver_precedence_and_windows_user_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path_executable = root / "path-ollama.exe"
+            explicit_executable = root / "explicit-ollama.exe"
+            path_executable.touch()
+            explicit_executable.touch()
+            with patch("ttea.benchmarking.ollama.shutil.which", return_value=str(path_executable)):
+                self.assertEqual(resolve_ollama_executable(), str(path_executable))
+                self.assertEqual(resolve_ollama_executable(explicit_executable), str(explicit_executable))
+            local = root / "local"
+            candidate = local / "Programs" / "Ollama" / "ollama.exe"
+            candidate.parent.mkdir(parents=True)
+            candidate.touch()
+            with patch("ttea.benchmarking.ollama.shutil.which", return_value=None), patch("ttea.benchmarking.ollama.os.name", "nt"), patch.dict("ttea.benchmarking.ollama.os.environ", {"LOCALAPPDATA": str(local)}, clear=False):
+                self.assertEqual(resolve_ollama_executable(), str(candidate))
+            candidate.unlink()
+            with patch("ttea.benchmarking.ollama.shutil.which", return_value=None), patch("ttea.benchmarking.ollama.os.name", "nt"), patch.dict("ttea.benchmarking.ollama.os.environ", {"LOCALAPPDATA": str(local)}, clear=False):
+                self.assertIsNone(resolve_ollama_executable())
+
+    @patch("ttea.benchmarking.ollama.resolve_ollama_executable", return_value=None)
+    def test_unresolved_executable_fails_before_popen(self, resolver):
+        popen = Mock()
+        result = OwnedOllamaServer(self.endpoint, self.policy, process_factory=popen).start()
+        self.assertFalse(result.success)
+        self.assertIn("could not be resolved", " ".join(result.reasons))
+        popen.assert_not_called()
+
+    def test_resolver_and_passive_check_do_not_mutate_environment(self):
+        before = dict(os.environ)
+        with patch("ttea.benchmarking.ollama.resolve_ollama_executable", return_value="C:/resolved/ollama.exe"), patch("ttea.benchmarking.ollama.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ollama version test", "")), patch("ttea.benchmarking.ollama.OllamaClient") as client_type:
+            client_type.return_value.version.return_value = "test"
+            client_type.return_value.installed_models.return_value = ()
+            executable, version, api, models = passive_ollama_check()
+        self.assertEqual(os.environ, before)
+        self.assertEqual(executable, "C:/resolved/ollama.exe")
+        self.assertEqual(version, "ollama version test")
+        self.assertEqual(api, "reachable (test)")
+        self.assertEqual(models, ())
 
 
 if __name__ == "__main__":

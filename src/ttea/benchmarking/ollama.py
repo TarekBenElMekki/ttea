@@ -28,6 +28,33 @@ class OllamaRuntimeError(RuntimeError):
     pass
 
 
+def _existing_file(candidate: str | Path | None) -> str | None:
+    if candidate is None:
+        return None
+    path = Path(candidate)
+    return str(path) if path.is_file() else None
+
+
+def resolve_ollama_executable(executable: str | Path | None = None) -> str | None:
+    """Resolve only an explicit executable, PATH, or the Windows user install path."""
+    if executable is not None:
+        explicit = str(executable).strip()
+        if not explicit:
+            return None
+        direct = _existing_file(explicit)
+        if direct is not None:
+            return direct
+        return _existing_file(shutil.which(explicit))
+    from_path = _existing_file(shutil.which("ollama"))
+    if from_path is not None:
+        return from_path
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            return _existing_file(Path(local_app_data) / "Programs" / "Ollama" / "ollama.exe")
+    return None
+
+
 def _positive_timeout(value: float, name: str) -> None:
     if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be a finite positive number")
@@ -190,7 +217,7 @@ class OllamaServerStartResult:
 class OwnedOllamaServer:
     """A dedicated Ollama server whose exact process tree is owned by T/TEA."""
 
-    def __init__(self, endpoint: OllamaEndpoint, policy: BenchmarkSafetyPolicy, *, executable: str = "ollama",
+    def __init__(self, endpoint: OllamaEndpoint, policy: BenchmarkSafetyPolicy, *, executable: str | Path | None = None,
                  startup_timeout_seconds: float = 15.0, http_timeout_seconds: float = 2.0,
                  process_factory=None, process_api=None, wait_procs=None, command_runner=None,
                  identity_callback=None) -> None:
@@ -221,13 +248,16 @@ class OwnedOllamaServer:
         started_at = datetime.now(timezone.utc)
         if self.identity is not None:
             return OllamaServerStartResult(False, ("owned Ollama server is already started",), started_at, datetime.now(timezone.utc), self.identity)
+        resolved_executable = resolve_ollama_executable(self.executable)
+        if resolved_executable is None:
+            return OllamaServerStartResult(False, ("Ollama executable could not be resolved; server was not started",), started_at, datetime.now(timezone.utc))
         kwargs: dict[str, Any] = {"env": self.environment(), "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             kwargs["start_new_session"] = True
         try:
-            self.process = self._process_factory([self.executable, "serve"], **kwargs)
+            self.process = self._process_factory([resolved_executable, "serve"], **kwargs)
             created = self._process_api(self.process.pid).create_time()
             self.identity = OwnedProcessIdentity(self.process.pid, created)
             if self._identity_callback is not None:
@@ -347,7 +377,10 @@ class OwnedOllamaServer:
 
     def stop_model_cli(self, model: str, timeout_seconds: float) -> None:
         _positive_timeout(timeout_seconds, "timeout_seconds")
-        result = self._command_runner([self.executable, "stop", model], env=self.environment(), capture_output=True,
+        resolved_executable = resolve_ollama_executable(self.executable)
+        if resolved_executable is None:
+            raise OllamaRuntimeError("Ollama executable could not be resolved for exact-model CLI cleanup")
+        result = self._command_runner([resolved_executable, "stop", model], env=self.environment(), capture_output=True,
                                       text=True, timeout=timeout_seconds, check=False)
         if result.returncode != 0:
             raise OllamaRuntimeError(f"exact-model CLI stop failed with code {result.returncode}")
@@ -391,7 +424,7 @@ class ControlledOllamaRuntime:
     """Canonical ResourceManager -> BenchmarkSupervisor -> Ollama worker path."""
 
     def __init__(self, resource_manager: ResourceManager, policy: BenchmarkSafetyPolicy | None = None,
-                 endpoint: OllamaEndpoint | None = None, *, executable: str = "ollama",
+                 endpoint: OllamaEndpoint | None = None, *, executable: str | Path | None = None,
                  startup_timeout_seconds: float = 15.0, control_timeout_seconds: float = 2.0,
                  state_path: Path = Path("data/runtime/benchmark.json")) -> None:
         _positive_timeout(control_timeout_seconds, "control_timeout_seconds")
@@ -482,8 +515,8 @@ class ControlledOllamaRuntime:
 
 def passive_ollama_check() -> tuple[str, str, str, tuple[str, ...] | None]:
     """Discover executable/default local API status without launching or generating."""
-    executable = shutil.which("ollama")
-    executable_text = "found" if executable else "not found"
+    executable = resolve_ollama_executable()
+    executable_text = executable or "not found"
     version = "unavailable"
     if executable:
         try:
