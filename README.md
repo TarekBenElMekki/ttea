@@ -6,6 +6,8 @@ The current core milestone adds typed runtime primitives for missions, tasks, ag
 
 It also provides deterministic lifecycle validation and task dependency queries. See [LIFECYCLE.md](LIFECYCLE.md).
 
+Authoritative in-memory lifecycle mutation and event creation are documented in [RUNTIME_STATE.md](RUNTIME_STATE.md).
+
 ## Setup
 
 Create the local environment and activate it in Windows PowerShell:

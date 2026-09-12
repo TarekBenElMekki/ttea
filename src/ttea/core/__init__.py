@@ -11,6 +11,7 @@ from .models import AgentSpec, Approval, Event, Mission, Task
 from .dependencies import dependencies_completed, get_ready_tasks, is_task_blocked, is_task_ready, validate_dependencies
 from .exceptions import CoreError, DependencyCycleError, DependencyError, InvalidStateTransition
 from .transitions import can_transition, validate_transition
+from .state_service import resolve_approval, transition_agent, transition_mission, transition_task
 
 __all__ = [
     "AgentSpec",
@@ -30,8 +31,12 @@ __all__ = [
     "is_task_ready",
     "Mission",
     "MissionStatus",
+    "resolve_approval",
     "Task",
     "TaskStatus",
+    "transition_agent",
+    "transition_mission",
+    "transition_task",
     "validate_dependencies",
     "validate_transition",
 ]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 
 from .enums import TaskStatus
 from .exceptions import DependencyCycleError, DependencyError
@@ -21,6 +21,9 @@ def _task_index(tasks: Iterable[Task]) -> dict[str, Task]:
 def validate_dependencies(tasks: Iterable[Task]) -> None:
     """Validate references and reject cycles in a task collection."""
     index = _task_index(tasks)
+    mission_ids = {task.mission_id for task in index.values()}
+    if len(mission_ids) > 1:
+        raise DependencyError("Tasks in a dependency graph must belong to the same mission")
     for task in index.values():
         dependency_ids = task.dependencies
         if len(dependency_ids) != len(set(dependency_ids)):
