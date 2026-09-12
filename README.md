@@ -22,6 +22,8 @@ Independent fail-safe supervision for future bounded benchmarks is documented in
 
 Dedicated loopback-only Ollama runtime plumbing is documented in [OLLAMA_BENCHMARKING.md](OLLAMA_BENCHMARKING.md).
 
+Unattended real-system integration checks and reports are documented in [VALIDATION.md](VALIDATION.md).
+
 ## Setup
 
 Create the local environment and activate it in Windows PowerShell:

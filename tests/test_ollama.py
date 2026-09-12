@@ -146,7 +146,29 @@ class OllamaTests(unittest.TestCase):
             result = runtime.run("missing", "prompt", ResourceRequest("test", 1, 1))
         self.assertEqual(result.outcome, BenchmarkOutcome.WORKER_FAILURE)
         self.assertIn("automatic pulls are forbidden", " ".join(result.reasons))
+        self.assertNotIn("cleanup failed", " ".join(result.reasons))
         supervisor.assert_not_called()
+        fake_client.unload.assert_not_called()
+        fake_server.stop_model_cli.assert_not_called()
+        fake_server.shutdown.assert_called_once_with(self.policy.cooldown_timeout_seconds)
+        self.assertFalse(self.state_path.exists())
+
+    def test_absent_unload_response_is_success_when_model_is_not_resident(self):
+        client, server = Mock(), Mock(policy=self.policy)
+        client.unload.side_effect = OllamaRuntimeError("HTTP 404")
+        client.running_models.return_value = ()
+        cleanup = OllamaCleanup(client, server, "absent").bounded()
+        cleanup.run(0.2)
+        server.stop_model_cli.assert_not_called()
+        server.shutdown.assert_called_once()
+
+    def test_unarmed_model_cleanup_is_server_only_until_generation_starts(self):
+        client, server = Mock(), Mock(policy=self.policy)
+        cleanup = OllamaCleanup(client, server, "present", model_cleanup_required=False)
+        cleanup.bounded().run(0.2)
+        client.unload.assert_not_called()
+        server.stop_model_cli.assert_not_called()
+        server.shutdown.assert_called_once()
 
     def test_controlled_runtime_routes_worker_through_supervisor(self):
         expected = BenchmarkResult(BenchmarkOutcome.COMPLETED, ("done",), datetime.now(timezone.utc), datetime.now(timezone.utc))
@@ -176,6 +198,8 @@ class OllamaTests(unittest.TestCase):
         with patch("ttea.benchmarking.ollama.OwnedOllamaServer", return_value=fake_server), patch("ttea.benchmarking.ollama.BenchmarkSupervisor", side_effect=ValueError("policy mismatch")):
             result = runtime.run("present", "prompt", ResourceRequest("test", 1, 1))
         self.assertEqual(result.outcome, BenchmarkOutcome.WORKER_FAILURE)
+        fake_client.unload.assert_not_called()
+        fake_server.stop_model_cli.assert_not_called()
         fake_server.shutdown.assert_called_once()
 
     def test_resource_delay_or_deny_never_constructs_owned_server(self):

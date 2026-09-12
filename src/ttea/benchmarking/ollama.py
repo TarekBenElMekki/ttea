@@ -387,18 +387,36 @@ class OwnedOllamaServer:
 
 
 class OllamaCleanup:
-    def __init__(self, client: OllamaClient, server: OwnedOllamaServer, model: str) -> None:
+    def __init__(self, client: OllamaClient, server: OwnedOllamaServer, model: str,
+                 model_cleanup_required: bool = True) -> None:
         self.client, self.server, self.model = client, server, model
+        self._model_cleanup_required = model_cleanup_required
         self._api_unloaded = False
 
+    def mark_model_cleanup_required(self) -> None:
+        """Arm model cleanup once a generation worker has actually started."""
+        self._model_cleanup_required = True
+
     def api_unload(self) -> None:
-        self.client.unload(self.model)
+        if not self._model_cleanup_required:
+            self._api_unloaded = True
+            return
+        try:
+            self.client.unload(self.model)
+        except OllamaRuntimeError:
+            # Ollama may report an absent/not-loaded model as an HTTP error.  A
+            # bounded authoritative residency check decides whether cleanup is
+            # already complete; an actually resident model still fails closed.
+            if self.model not in self.client.running_models():
+                self._api_unloaded = True
+                return
+            raise
         self._api_unloaded = self.model not in self.client.running_models()
         if not self._api_unloaded:
             raise OllamaRuntimeError("model remained loaded after API unload")
 
     def cli_stop(self) -> None:
-        if not self._api_unloaded:
+        if self._model_cleanup_required and not self._api_unloaded:
             self.server.stop_model_cli(self.model, self.server.policy.cooldown_timeout_seconds)
 
     def shutdown_server(self) -> None:
@@ -461,7 +479,7 @@ class ControlledOllamaRuntime:
             http_timeout_seconds=self.control_timeout_seconds,
             identity_callback=lambda identity: state_store.record_server(identity.pid, identity.started_epoch),
         )
-        cleanup = None
+        cleanup: IdempotentCleanup | None = None
         try:
             startup = server.start()
             if not startup.success:
@@ -469,13 +487,18 @@ class ControlledOllamaRuntime:
                     state_store.release()
                 return self._failure(started, *startup.reasons)
             client = server.client()
-            cleanup = OllamaCleanup(client, server, model).bounded()
+            # Until local model availability is confirmed there has been no
+            # load/generation attempt, so cleanup owns only the server.
+            cleanup = IdempotentCleanup((lambda: server.shutdown(self.policy.cooldown_timeout_seconds),))
             client.health()
             if model not in client.installed_models():
                 raise OllamaRuntimeError(f"model {model!r} is not installed locally; automatic pulls are forbidden")
+            model_cleanup = OllamaCleanup(client, server, model, model_cleanup_required=False)
+            cleanup = model_cleanup.bounded()
             supervisor = BenchmarkSupervisor(
                 self.resource_manager, self.policy, cleanup, self.state_path,
                 state_store=state_store, state_already_acquired=True,
+                worker_started_callback=model_cleanup.mark_model_cleanup_required,
             )
             return supervisor.run(OllamaBenchmarkWorker(client, model, prompt), resource_request)
         except KeyboardInterrupt:

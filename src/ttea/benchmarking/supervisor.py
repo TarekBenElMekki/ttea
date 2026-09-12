@@ -62,7 +62,7 @@ class BenchmarkSupervisor:
     def __init__(self, resource_manager: ResourceManager, policy: BenchmarkSafetyPolicy | None = None,
                  cleanup: IdempotentCleanup | None = None, state_path: Path = Path("data/runtime/benchmark.json"),
                  multiprocessing_context=None, state_store: BenchmarkStateStore | None = None,
-                 state_already_acquired: bool = False) -> None:
+                 state_already_acquired: bool = False, worker_started_callback=None) -> None:
         self.resource_manager = resource_manager
         self.policy = policy or BenchmarkSafetyPolicy()
         if resource_manager.policy is not None:
@@ -70,6 +70,7 @@ class BenchmarkSupervisor:
         self.cleanup = cleanup or IdempotentCleanup()
         self.state_store = state_store or BenchmarkStateStore(state_path)
         self.state_already_acquired = state_already_acquired
+        self.worker_started_callback = worker_started_callback
         self.context = multiprocessing_context or multiprocessing.get_context("spawn")
         self._active_process = None
         setup_logging()
@@ -138,6 +139,8 @@ class BenchmarkSupervisor:
             messages = self.context.Queue()
             process = self.context.Process(target=_worker_entry, args=(worker, messages), name="ttea-benchmark-worker")
             process.start()
+            if self.worker_started_callback is not None:
+                self.worker_started_callback()
             self._active_process = process
             worker_pid = process.pid
             self.state_store.record_worker(worker_pid)

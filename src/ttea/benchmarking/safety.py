@@ -79,6 +79,11 @@ class BenchmarkStateStore:
         except (OSError, ValueError):
             return None
 
+    def snapshot(self) -> dict[str, object] | None:
+        """Return a detached diagnostic copy of the recorded ownership state."""
+        state = self._read()
+        return None if state is None else dict(state)
+
     def acquire(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
