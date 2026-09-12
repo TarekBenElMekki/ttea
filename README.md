@@ -10,6 +10,8 @@ Authoritative in-memory lifecycle mutation and event creation are documented in 
 
 Local SQLite persistence is documented in [PERSISTENCE.md](PERSISTENCE.md).
 
+Read-only persisted-state analysis is documented in [RECOVERY.md](RECOVERY.md).
+
 ## Setup
 
 Create the local environment and activate it in Windows PowerShell:
