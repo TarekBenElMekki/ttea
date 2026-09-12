@@ -66,17 +66,25 @@ def listening_identity(port: int) -> OwnedProcessIdentity | None:
 
 
 def stop_verified_process(identity: OwnedProcessIdentity, timeout_seconds: float = 3.0, process_api=psutil.Process) -> None:
-    process = process_api(identity.pid)
+    try:
+        process = process_api(identity.pid)
+    except psutil.NoSuchProcess:
+        return
     if process.pid != identity.pid or abs(process.create_time() - identity.started_epoch) > 2.0:
         raise RuntimeError("owned process identity no longer matches")
     process.terminate()
     try:
         process.wait(timeout=timeout_seconds / 2)
+    except psutil.NoSuchProcess:
+        return
     except psutil.TimeoutExpired:
         if process.pid != identity.pid or abs(process.create_time() - identity.started_epoch) > 2.0:
             raise RuntimeError("owned process identity changed before forced stop")
         process.kill()
-        process.wait(timeout=timeout_seconds / 2)
+        try:
+            process.wait(timeout=timeout_seconds / 2)
+        except psutil.NoSuchProcess:
+            return
 
 
 @dataclass
@@ -269,16 +277,18 @@ class ResourcePreflightScenario(ValidationScenario):
         consistent = budget.allocatable_ram_bytes <= budget.available_ram_bytes and budget.allocatable_disk_bytes <= budget.free_disk_bytes
         if any(gpu.allocatable_vram_bytes > (gpu.free_vram_bytes or 0) for gpu in budget.gpus):
             consistent = False
+        assessment = context.resource_manager.assess(ResourceRequest("validation-model-less-server", 256 * MIB, 16 * MIB))
         return {"snapshot_timestamp": budget.snapshot_timestamp.isoformat(), "ram_available_bytes": budget.available_ram_bytes,
                 "ram_reserved_bytes": budget.reserved_ram_bytes, "ram_allocatable_bytes": budget.allocatable_ram_bytes,
                 "disk_free_bytes": budget.free_disk_bytes, "disk_reserved_bytes": budget.reserved_disk_bytes,
-                "telemetry_consistent": consistent}
+                "telemetry_consistent": consistent, "resource_decision": assessment.decision.value,
+                "resource_reasons": list(assessment.reasons)}
 
     def verify(self, context, execution):
         if not execution["telemetry_consistent"]:
             return ScenarioVerification(ValidationStatus.FAIL, ("resource telemetry is internally inconsistent",))
-        if execution["ram_allocatable_bytes"] == 0:
-            return ScenarioVerification(ValidationStatus.BLOCKED, ("allocatable RAM is zero after applying the T/TEA reserve",))
+        if execution["resource_decision"] != ResourceDecision.ALLOW.value:
+            return ScenarioVerification(ValidationStatus.BLOCKED, tuple(execution["resource_reasons"]))
         return ScenarioVerification(reasons=("resource telemetry is internally consistent",))
 
 

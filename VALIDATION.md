@@ -21,3 +21,19 @@ The model-less recovery tolerance is `max(256 MiB, 5% of baseline available RAM)
 The suite registry is intentionally extensible for future `tiny_model`, `model_tournament`, `runtime_regression`, and `full_system` suites. None of those model-running suites is implemented yet.
 
 Process control always requires an exact trusted handle or verified PID plus creation time. The PowerShell emergency-stop script remains a disaster-recovery backup, not part of routine validation.
+
+## Persistent campaigns
+
+A campaign persistently advances through registered validation suites and requires `pre_model` to reach a real `PASS` before any future model suite can run. Start the current campaign detached from the launching terminal:
+
+```powershell
+.\.venv\Scripts\python.exe -m ttea.validation campaign start --through pre_model --detach
+```
+
+The lightweight detached Python supervisor uses no Windows service, Task Scheduler entry, administrator privilege, or second terminal. On a resource-only `DELAY`, it records `WAITING_FOR_RESOURCES`, sleeps for a bounded polling interval (30 seconds by default), samples fresh telemetry, and retries automatically. It never detects development tools by process name, closes applications, or waits forever; non-resource blocks and `DENY` become `BLOCKED`, validation failures become `FAILED`, and the default maximum duration is six hours.
+
+Use `campaign status` (or `campaign status --json`) to inspect the persisted heartbeat, last validation, reason, retry time, and verified supervisor identity. `campaign list` shows campaign history, `campaign cancel` requests graceful shutdown before considering exact PID/create-time termination, and `campaign resume` safely restarts an interrupted or blocked campaign only after the benchmark ownership guard accepts the machine state.
+
+Campaign state and its low-frequency log live under `data/validation/campaigns/<campaign-id>/`. Atomic `campaign.json` updates contain validation run references and resource-wait periods; terminal campaigns also produce `campaign-report.json` and `campaign-report.txt` without duplicating suite reports. A crashed or stale supervisor is marked `INTERRUPTED` by status inspection and remains resumable rather than having its ownership data blindly deleted.
+
+Routine campaigns rely on the same resource, process, port, and cleanup guards as direct validation. The emergency PowerShell script remains fallback recovery only.
