@@ -37,6 +37,11 @@ class FakeManager:
         return result
 
 
+class ResultWorker(NoOpBenchmarkWorker):
+    def run(self):
+        return ("structured", 7)
+
+
 class BenchmarkingTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -58,6 +63,11 @@ class BenchmarkingTests(unittest.TestCase):
         self.assertEqual(self.supervisor(FakeManager([budget()])).run(SleepingBenchmarkWorker(2), self.request).outcome, BenchmarkOutcome.TIMEOUT)
         self.assertEqual(self.supervisor(FakeManager([budget()])).run(FailingBenchmarkWorker(), self.request).outcome, BenchmarkOutcome.WORKER_FAILURE)
         self.assertFalse(self.path.exists())
+
+    def test_worker_result_crosses_supervisor_boundary(self):
+        result = self.supervisor(FakeManager([budget()])).run(ResultWorker(), self.request)
+        self.assertEqual(result.outcome, BenchmarkOutcome.COMPLETED)
+        self.assertEqual(result.worker_result, ("structured", 7))
 
     def test_preflight_must_allow(self):
         result = self.supervisor(FakeManager([budget()], ResourceDecision.DELAY)).run(NoOpBenchmarkWorker(), self.request)

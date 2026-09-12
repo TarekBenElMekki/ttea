@@ -69,6 +69,7 @@ class BenchmarkResult:
     started_at: datetime
     finished_at: datetime
     worker_pid: int | None = None
+    worker_result: object | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, BenchmarkOutcome):

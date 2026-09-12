@@ -20,6 +20,8 @@ Deterministic workload resource decisions based on fresh telemetry are documente
 
 Independent fail-safe supervision for future bounded benchmarks is documented in [BENCHMARK_SAFETY.md](BENCHMARK_SAFETY.md).
 
+Dedicated loopback-only Ollama runtime plumbing is documented in [OLLAMA_BENCHMARKING.md](OLLAMA_BENCHMARKING.md).
+
 ## Setup
 
 Create the local environment and activate it in Windows PowerShell:

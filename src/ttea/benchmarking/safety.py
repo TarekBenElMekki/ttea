@@ -87,10 +87,14 @@ class BenchmarkStateStore:
                 raise RuntimeError("another recorded benchmark supervisor is still active")
             if state and self.process_matches(state.get("worker_pid"), state.get("worker_started_epoch")):
                 raise RuntimeError("another recorded benchmark worker is still active")
+            if state and self.process_matches(state.get("server_pid"), state.get("server_started_epoch")):
+                raise RuntimeError("another recorded Ollama server is still active")
             self.path.unlink(missing_ok=True)
         supervisor_started = psutil.Process(os.getpid()).create_time()
         state = {"supervisor_pid": os.getpid(), "supervisor_started_epoch": supervisor_started,
-                 "worker_pid": None, "started_at": datetime.now(timezone.utc).isoformat()}
+                 "server_pid": None, "server_started_epoch": None,
+                 "worker_pid": None, "worker_started_epoch": None,
+                 "started_at": datetime.now(timezone.utc).isoformat()}
         try:
             with self.path.open("x", encoding="utf-8") as handle:
                 json.dump(state, handle, sort_keys=True)
@@ -107,7 +111,22 @@ class BenchmarkStateStore:
         temporary.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
         temporary.replace(self.path)
 
+    def record_server(self, pid: int, started_epoch: float) -> None:
+        if not self.process_matches(pid, started_epoch):
+            raise RuntimeError("owned Ollama server identity could not be verified")
+        state = self._read() or {}
+        if state.get("supervisor_pid") != os.getpid() or not self.process_matches(state.get("supervisor_pid"), state.get("supervisor_started_epoch")):
+            raise RuntimeError("benchmark state is not owned by this supervisor")
+        state.update(server_pid=pid, server_started_epoch=started_epoch)
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+        temporary.replace(self.path)
+
     def release(self) -> None:
         state = self._read()
         if state and state.get("supervisor_pid") == os.getpid() and self.process_matches(state.get("supervisor_pid"), state.get("supervisor_started_epoch")):
+            if self.process_matches(state.get("worker_pid"), state.get("worker_started_epoch")):
+                raise RuntimeError("cannot release state while the recorded worker is active")
+            if self.process_matches(state.get("server_pid"), state.get("server_started_epoch")):
+                raise RuntimeError("cannot release state while the recorded Ollama server is active")
             self.path.unlink(missing_ok=True)

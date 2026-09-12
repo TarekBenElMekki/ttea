@@ -13,6 +13,7 @@ import time
 from ttea.resources import GpuResourceBudget, ResourceAssessment, ResourceBudget, ResourceDecision, ResourcePolicy, ResourceRequest
 
 from .models import BenchmarkOutcome, BenchmarkSafetyPolicy
+from .ollama import passive_ollama_check
 from .safety import BenchmarkStateStore, CleanupFailure, IdempotentCleanup
 from .supervisor import BenchmarkSupervisor, NoOpBenchmarkWorker, SleepingBenchmarkWorker
 
@@ -110,11 +111,17 @@ def self_test() -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="T/TEA benchmark safety supervisor")
-    parser.add_argument("--self-test", action="store_true", help="run harmless supervision checks")
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument("--self-test", action="store_true", help="run harmless supervision checks")
+    modes.add_argument("--ollama-check", action="store_true", help="passively check local Ollama availability")
     arguments = parser.parse_args()
-    if not arguments.self_test:
-        parser.error("no benchmark implementation exists; use --self-test")
-    if not self_test():
+    if arguments.ollama_check:
+        executable, version, api, models = passive_ollama_check()
+        print("T/TEA Ollama Check\n------------------")
+        print(f"Executable: {executable}\nVersion: {version}\nDefault API: {api}")
+        installed = "unavailable" if models is None else (", ".join(models) or "(none)")
+        print(f"Models installed: {installed}")
+    elif not self_test():
         raise SystemExit(1)
 
 

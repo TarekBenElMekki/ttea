@@ -50,24 +50,26 @@ class FailingBenchmarkWorker(BenchmarkWorker):
 
 def _worker_entry(worker: BenchmarkWorker, messages) -> None:
     try:
-        worker.run()
+        result = worker.run()
     except BaseException as error:
         messages.put(("failure", f"{type(error).__name__}: {error}"))
         raise
     else:
-        messages.put(("completed", "benchmark worker completed"))
+        messages.put(("completed", result))
 
 
 class BenchmarkSupervisor:
     def __init__(self, resource_manager: ResourceManager, policy: BenchmarkSafetyPolicy | None = None,
                  cleanup: IdempotentCleanup | None = None, state_path: Path = Path("data/runtime/benchmark.json"),
-                 multiprocessing_context=None) -> None:
+                 multiprocessing_context=None, state_store: BenchmarkStateStore | None = None,
+                 state_already_acquired: bool = False) -> None:
         self.resource_manager = resource_manager
         self.policy = policy or BenchmarkSafetyPolicy()
         if resource_manager.policy is not None:
             self.policy.validate_with(resource_manager.policy)
         self.cleanup = cleanup or IdempotentCleanup()
-        self.state_store = BenchmarkStateStore(state_path)
+        self.state_store = state_store or BenchmarkStateStore(state_path)
+        self.state_already_acquired = state_already_acquired
         self.context = multiprocessing_context or multiprocessing.get_context("spawn")
         self._active_process = None
         setup_logging()
@@ -120,16 +122,19 @@ class BenchmarkSupervisor:
         started_at = datetime.now(timezone.utc)
         worker_pid = None
         outcome, reasons = BenchmarkOutcome.WORKER_FAILURE, ("benchmark did not start",)
+        worker_result = None
         process = None
         messages = None
-        acquired = False
+        acquired = self.state_already_acquired
         worker_shutdown_confirmed = True
+        cleanup_confirmed = True
         try:
             assessment = self.resource_manager.assess(request)
             if assessment.decision is not ResourceDecision.ALLOW:
                 return BenchmarkResult(BenchmarkOutcome.RESOURCE_PRESSURE, assessment.reasons, started_at, datetime.now(timezone.utc))
-            self.state_store.acquire()
-            acquired = True
+            if not acquired:
+                self.state_store.acquire()
+                acquired = True
             messages = self.context.Queue()
             process = self.context.Process(target=_worker_entry, args=(worker, messages), name="ttea-benchmark-worker")
             process.start()
@@ -145,7 +150,8 @@ class BenchmarkSupervisor:
                 try:
                     status, detail = messages.get_nowait()
                     outcome = BenchmarkOutcome.COMPLETED if status == "completed" else BenchmarkOutcome.WORKER_FAILURE
-                    reasons = (detail,)
+                    reasons = ("benchmark worker completed",) if status == "completed" else (detail,)
+                    worker_result = detail if status == "completed" else None
                     break
                 except queue.Empty:
                     pass
@@ -154,7 +160,8 @@ class BenchmarkSupervisor:
                     try:
                         status, detail = messages.get(timeout=0.1)
                         outcome = BenchmarkOutcome.COMPLETED if status == "completed" else BenchmarkOutcome.WORKER_FAILURE
-                        reasons = (detail,)
+                        reasons = ("benchmark worker completed",) if status == "completed" else (detail,)
+                        worker_result = detail if status == "completed" else None
                     except queue.Empty:
                         outcome, reasons = BenchmarkOutcome.WORKER_FAILURE, (f"worker exited with code {process.exitcode}",)
                     break
@@ -186,10 +193,15 @@ class BenchmarkSupervisor:
             try:
                 self.cleanup.run(self.policy.cooldown_timeout_seconds)
             except Exception as error:
+                cleanup_confirmed = False
                 LOGGER.exception("benchmark cleanup failed: %s", error)
                 reasons = reasons + (f"cleanup failed: {error}",)
                 if outcome is BenchmarkOutcome.COMPLETED:
                     outcome = BenchmarkOutcome.WORKER_FAILURE
-            if acquired and worker_shutdown_confirmed:
-                self.state_store.release()
-        return BenchmarkResult(outcome, reasons, started_at, datetime.now(timezone.utc), worker_pid)
+            if acquired and worker_shutdown_confirmed and cleanup_confirmed:
+                try:
+                    self.state_store.release()
+                except Exception as error:
+                    outcome = BenchmarkOutcome.WORKER_FAILURE
+                    reasons = reasons + (f"ownership state release failed: {error}",)
+        return BenchmarkResult(outcome, reasons, started_at, datetime.now(timezone.utc), worker_pid, worker_result)

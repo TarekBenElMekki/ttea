@@ -1,6 +1,6 @@
 # Benchmark Safety Supervisor
 
-Zero-risk benchmarking cannot literally be guaranteed, so future local-model tests are bounded and independently supervised. A parent supervisor requires an `ALLOW` Resource Manager preflight, starts exactly one child worker for one model and one request, and samples fresh runtime telemetry while the child runs.
+Zero-risk benchmarking cannot literally be guaranteed, so future local-model tests are bounded and independently supervised. Controlled Ollama execution requires an `ALLOW` Resource Manager assessment before server startup and a second fresh supervisor preflight before generation. A parent supervisor starts exactly one child worker for one model and one request, and samples fresh runtime telemetry while the child runs.
 
 Preflight requires the requested GPU allocation plus reserve to fit before launch. Once resident, the watchdog protects the remaining VRAM reserve without double-counting that allocation. It aborts after consecutive RAM or VRAM reserve violations, immediately aborts when required GPU telemetry disappears, and uses the stricter of the benchmark and effective Resource Policy thermal thresholds. GPU warning temperatures are logged. CPU temperature is not used because it is not reliably available on all supported machines.
 
