@@ -4,6 +4,8 @@ T/TEA currently provides a clean Python foundation and minimal typed runtime dom
 
 The current core milestone adds typed runtime primitives for missions, tasks, agent specifications, approvals, and events. See [CORE_MODEL.md](CORE_MODEL.md).
 
+It also provides deterministic lifecycle validation and task dependency queries. See [LIFECYCLE.md](LIFECYCLE.md).
+
 ## Setup
 
 Create the local environment and activate it in Windows PowerShell:
