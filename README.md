@@ -18,6 +18,8 @@ Local passive measurement is documented in [HARDWARE_TELEMETRY.md](HARDWARE_TELE
 
 Deterministic workload resource decisions based on fresh telemetry are documented in [RESOURCE_MANAGEMENT.md](RESOURCE_MANAGEMENT.md).
 
+Independent fail-safe supervision for future bounded benchmarks is documented in [BENCHMARK_SAFETY.md](BENCHMARK_SAFETY.md).
+
 ## Setup
 
 Create the local environment and activate it in Windows PowerShell:
