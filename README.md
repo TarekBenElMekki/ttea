@@ -1,6 +1,8 @@
 # T/TEA
 
-T/TEA is currently a Python project foundation only. Mission orchestration and other domain features are intentionally out of scope for this milestone.
+T/TEA currently provides a clean Python foundation and minimal typed runtime domain model. Mission orchestration and other execution features are intentionally out of scope for this milestone.
+
+The current core milestone adds typed runtime primitives for missions, tasks, agent specifications, approvals, and events. See [CORE_MODEL.md](CORE_MODEL.md).
 
 ## Setup
 

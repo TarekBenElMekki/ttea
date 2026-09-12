@@ -18,4 +18,4 @@ The display name is T/TEA, while the repository and Python package are `ttea`. F
 
 ## Milestone decisions
 
-Configuration is intentionally small and environment-backed. Logging is standard-library based and designed to support future named areas without a separate logging system. No domain, orchestration, provider, scheduling, database, UI, or telemetry code exists in this milestone.
+Configuration is intentionally small and environment-backed. Logging is standard-library based and designed to support future named areas without a separate logging system. The subsequent core-model milestone adds only typed runtime primitives; no orchestration, provider, scheduling, database, UI, or telemetry code exists.
