@@ -131,7 +131,7 @@ class WatchTests(unittest.TestCase):
         value = self.snapshot(CampaignState.RUNNING)
         value = replace(value, campaign=campaign(CampaignState.RUNNING, (record,)))
         text = CampaignWatchRenderer(color=False).render(value)
-        self.assertIn("Latest result  PASS pre_model", text)
+        self.assertIn("Latest result PASS pre_model", text)
 
     def test_ollama_metadata_is_cached_and_reader_never_calls_active_operations(self):
         with tempfile.TemporaryDirectory() as directory:

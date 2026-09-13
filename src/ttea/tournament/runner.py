@@ -1,9 +1,10 @@
-"""Provider-neutral contracts. Execution is deliberately disabled."""
+"""Provider-neutral tournament execution contracts."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+import math
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -56,6 +57,9 @@ class TournamentExecutionRequest:
     context_limit: int
     output_limit: int
     timeout_seconds: float
+    temperature: float = 0.0
+    cpu_threads: int = 4
+    keep_alive: int = 0
 
     def __post_init__(self) -> None:
         for name in ("candidate_id", "round_id", "task_id", "provider", "model", "prompt"):
@@ -67,8 +71,14 @@ class TournamentExecutionRequest:
             minimum = 0 if name == "repetition" else 1
             if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
                 raise ValueError(f"invalid {name}")
-        if not isinstance(self.timeout_seconds, (int, float)) or isinstance(self.timeout_seconds, bool) or self.timeout_seconds <= 0:
+        if not isinstance(self.timeout_seconds, (int, float)) or isinstance(self.timeout_seconds, bool) or not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if not isinstance(self.temperature, (int, float)) or isinstance(self.temperature, bool) or not math.isfinite(self.temperature) or self.temperature < 0:
+            raise ValueError("temperature must be a finite non-negative number")
+        if not isinstance(self.cpu_threads, int) or isinstance(self.cpu_threads, bool) or self.cpu_threads <= 0:
+            raise ValueError("cpu_threads must be a positive integer")
+        if self.keep_alive != 0:
+            raise ValueError("tournament keep_alive must be zero")
 
 
 class TournamentProvider(ABC):

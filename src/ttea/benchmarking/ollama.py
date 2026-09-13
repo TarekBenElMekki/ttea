@@ -208,7 +208,8 @@ class OllamaClient:
         return payload
 
     def generate(self, model: str, prompt: str, *, num_ctx: int | None = None,
-                 num_predict: int | None = None, num_thread: int | None = None) -> OllamaGenerationResult:
+                 num_predict: int | None = None, num_thread: int | None = None,
+                 temperature: float | None = None, keep_alive: int = 0) -> OllamaGenerationResult:
         if not isinstance(model, str) or not model.strip() or not isinstance(prompt, str) or not prompt:
             raise ValueError("model and prompt must be non-empty strings")
         bounds = {
@@ -220,7 +221,26 @@ class OllamaClient:
         for name, value in bounds.items():
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0 or value > maxima[name]:
                 raise ValueError(f"{name} must be a positive integer no greater than its safety-policy bound")
-        payload = {"model": model, "prompt": prompt, "stream": False, "keep_alive": 0, "options": bounds}
+        if temperature is not None:
+            if (
+                not isinstance(temperature, (int, float))
+                or isinstance(temperature, bool)
+                or not math.isfinite(temperature)
+                or temperature < 0
+            ):
+                raise ValueError("temperature must be a finite non-negative number")
+        if keep_alive != 0:
+            raise ValueError("controlled generation requires keep_alive=0")
+        options = dict(bounds)
+        if temperature is not None:
+            options["temperature"] = temperature
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "keep_alive": 0,
+            "options": options,
+        }
         return OllamaGenerationResult.from_payload(
             self._request("POST", "/api/generate", payload, self.policy.request_timeout_seconds)
         )
@@ -465,13 +485,34 @@ class OllamaCleanup:
 class OllamaBenchmarkWorker(BenchmarkWorker):
     """Exactly one local model, prompt, and bounded non-streaming generation."""
 
-    def __init__(self, client: OllamaClient, model: str, prompt: str) -> None:
+    def __init__(self, client: OllamaClient, model: str, prompt: str, *,
+                 num_ctx: int | None = None, num_predict: int | None = None,
+                 num_thread: int | None = None, temperature: float | None = None,
+                 keep_alive: int = 0) -> None:
         if not isinstance(model, str) or not model.strip() or not isinstance(prompt, str) or not prompt:
             raise ValueError("model and prompt must be non-empty strings")
         self.client, self.model, self.prompt = client, model, prompt
+        self.num_ctx, self.num_predict, self.num_thread = num_ctx, num_predict, num_thread
+        self.temperature, self.keep_alive = temperature, keep_alive
 
     def run(self) -> OllamaGenerationResult:
-        return self.client.generate(self.model, self.prompt)
+        if (
+            self.num_ctx is None
+            and self.num_predict is None
+            and self.num_thread is None
+            and self.temperature is None
+            and self.keep_alive == 0
+        ):
+            return self.client.generate(self.model, self.prompt)
+        return self.client.generate(
+            self.model,
+            self.prompt,
+            num_ctx=self.num_ctx,
+            num_predict=self.num_predict,
+            num_thread=self.num_thread,
+            temperature=self.temperature,
+            keep_alive=self.keep_alive,
+        )
 
 
 class ControlledOllamaRuntime:

@@ -12,13 +12,25 @@ from types import MappingProxyType
 from typing import Mapping
 
 from .manifest import SAFETY_CANDIDATE, TournamentManifest
-from .models import CandidateVariant, TournamentCandidate
+from .models import CandidateVariant, TournamentCandidate, TournamentPhase, TournamentRound, TournamentTask
 
 
 GIB = 1024 * 1024 * 1024
 RESEARCH_DATE = "2026-09-13"
 CATALOG_SOURCE = "official Ollama library"
 CONTEXT_TARGET = 4096
+SURVIVAL_PROMPT = "Reply exactly with: TTEA_SURVIVAL_OK"
+SURVIVAL_TASK = TournamentTask(
+    "survival_probe", "hardware_survival", SURVIVAL_PROMPT,
+    "bounded non-empty text", "runtime_terminal", 1.0,
+    CONTEXT_TARGET, 32, 180.0,
+)
+SURVIVAL_ROUND = TournamentRound(
+    "survival_4k", TournamentPhase.SURVIVAL, (SURVIVAL_TASK.task_id,),
+    1, CONTEXT_TARGET, 32, "fresh_resource_admission",
+    "benchmark_supervisor_request_300_model_180",
+    "pass_fail_hardware_survival", "hard_safety_gates",
+)
 
 
 class ResearchTier(str, Enum):
@@ -167,3 +179,8 @@ TIER_MEMBERSHIP: Mapping[ResearchTier, tuple[str, ...]] = MappingProxyType({
 def build_real_candidate_manifest() -> TournamentManifest:
     """Return the closed candidate manifest; this does not start a tournament."""
     return TournamentManifest(candidates=(SAFETY_CANDIDATE,) + REAL_CANDIDATES)
+
+
+def build_survival_manifest() -> TournamentManifest:
+    """Return the closed executable first-round manifest in catalog order."""
+    return TournamentManifest(REAL_CANDIDATES, (SURVIVAL_ROUND,), (SURVIVAL_TASK,))
