@@ -41,7 +41,7 @@ from .ollama_provider import (
     OllamaTournamentProvider, ProvisioningDeferred, ProvisioningRejected,
     ProvisioningResourceDelayed, ProvisioningResourceDenied,
     ProvisioningRuntimeDelayed,
-    SurvivalExecutionResult,
+    SurvivalExecutionResult, survival_resource_request,
 )
 from .survival import (
     SurvivalTournamentEngine, survival_report_payload, survival_report_text,
@@ -64,7 +64,7 @@ __all__ = (
     "SchedulerDecision", "SelectionPolicy", "SelectionRole", "TaskResult", "TimestampRegressionError", "TournamentAttempt",
     "TournamentCandidate", "TournamentExecutionDisabled", "TournamentExecutionRequest",
     "TournamentIntegrityError", "TournamentManifest", "TournamentPhase", "TournamentProvider", "TournamentResult",
-    "SurvivalCampaign", "SurvivalCampaignState", "SurvivalExecutionPolicy", "SurvivalExecutionResult", "SurvivalOutcome", "SurvivalStore", "SurvivalTournamentEngine", "TournamentRound", "TournamentSelection", "TournamentSerializationError", "TournamentSnapshot", "TournamentSupervisorManager",
+    "SurvivalCampaign", "SurvivalCampaignState", "SurvivalExecutionPolicy", "SurvivalExecutionResult", "SurvivalOutcome", "SurvivalStore", "SurvivalTournamentEngine", "survival_resource_request", "TournamentRound", "TournamentSelection", "TournamentSerializationError", "TournamentSnapshot", "TournamentSupervisorManager",
     "TournamentState", "TournamentStore", "TournamentStoreError", "TournamentTask",
     "TIER_MEMBERSHIP", "TIER_RESOURCE_ESTIMATES", "TournamentTransitionError", "TournamentWorkItem", "WorkDisposition", "aggregate_round", "apply_scheduler_decision", "attempt_id", "build_real_candidate_manifest", "build_survival_manifest", "calculate_progress",
     "composite", "eliminate_candidate", "execute", "next_work", "ordered_work",

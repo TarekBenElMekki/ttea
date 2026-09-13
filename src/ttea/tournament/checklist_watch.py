@@ -2,13 +2,107 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import sys
 import time
 from pathlib import Path
 from typing import Callable, TextIO
 
+import psutil
+
+from ttea.resources import ResourceDecision
+
+from .ollama_provider import survival_resource_request
 from .watch import TournamentWatchSnapshot, TournamentWatcher
+
+
+_GIB = 1024 * 1024 * 1024
+
+# RSS is not equivalent to immediately reclaimable Windows memory. Use a
+# deliberately conservative estimate for the "likely" projection.
+_CHROME_CONSERVATIVE_RECLAIM_RATIO = 0.60
+
+_CHROME_CLOSED_RSS_THRESHOLD_BYTES = 64 * 1024 * 1024
+_CHROME_SIGNIFICANT_RSS_BYTES = 256 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ChromeRamSnapshot:
+    chrome_process_count: int
+    chrome_rss_bytes: int
+    available_ram_bytes: int
+    total_ram_bytes: int
+
+
+def _format_gib(value: int) -> str:
+    return f"{value / _GIB:.2f} GiB"
+
+
+def _is_ram_wait(reason: str | None) -> bool:
+    normalized = (reason or "").lower()
+
+    markers = (
+        "available ram",
+        "reserved ram",
+        "ram reserve",
+        "memory pressure",
+        "memory remained",
+    )
+
+    return any(marker in normalized for marker in markers)
+
+
+def _sample_chrome_ram() -> ChromeRamSnapshot:
+    memory = psutil.virtual_memory()
+
+    chrome_process_count = 0
+    chrome_rss_bytes = 0
+
+    for process in psutil.process_iter(("name", "memory_info")):
+        try:
+            name = str(process.info.get("name") or "").lower()
+
+            if name not in {"chrome", "chrome.exe"}:
+                continue
+
+            chrome_process_count += 1
+
+            memory_info = process.info.get("memory_info")
+
+            if memory_info is not None:
+                chrome_rss_bytes += int(memory_info.rss)
+
+        except (
+            psutil.AccessDenied,
+            psutil.NoSuchProcess,
+            psutil.ZombieProcess,
+        ):
+            continue
+
+    return ChromeRamSnapshot(
+        chrome_process_count=chrome_process_count,
+        chrome_rss_bytes=chrome_rss_bytes,
+        available_ram_bytes=int(memory.available),
+        total_ram_bytes=int(memory.total),
+    )
+
+
+def _admission_probe(watcher: TournamentWatcher) -> Callable[[TournamentWatchSnapshot], object | None]:
+    """Create a passive fresh-assessment callback for the current candidate."""
+    def assess(snapshot: TournamentWatchSnapshot) -> object | None:
+        campaign = snapshot.campaign
+        candidate_id = None if campaign is None else campaign.current_candidate_id
+        if campaign is None or not candidate_id:
+            return None
+        try:
+            manifest = watcher.store.tournaments.load_manifest(campaign.tournament_id)
+            candidate = manifest.candidate(candidate_id)
+            return watcher.resource_manager.assess(survival_resource_request(candidate))
+        except Exception:
+            return None
+
+    return assess
 
 
 _TERMINAL_CAMPAIGN_STATES = {
@@ -159,6 +253,107 @@ def _next_action(
 
 class TournamentChecklistRenderer:
     """Render one passive tournament snapshot as an operational checklist."""
+
+    def __init__(
+        self,
+        *,
+        ram_sampler: Callable[[], ChromeRamSnapshot] = _sample_chrome_ram,
+        admission_assessor: Callable[[TournamentWatchSnapshot], object | None] | None = None,
+    ) -> None:
+        self._ram_sampler = ram_sampler
+        self._admission_assessor = admission_assessor or (lambda snapshot: None)
+        self._previous_ram_sample: ChromeRamSnapshot | None = None
+        self._previous_ram_context: tuple[str, str] | None = None
+
+    def _render_ram_wait_diagnostic(self, snapshot: TournamentWatchSnapshot) -> list[str]:
+        sample = self._ram_sampler()
+        assessment = self._admission_assessor(snapshot)
+        decision = getattr(assessment, "decision", None)
+        decision_text = _value(decision) or "UNAVAILABLE"
+        headroom = getattr(assessment, "ram_headroom_bytes", None)
+        shortfall = max(0, -headroom) if isinstance(headroom, int) else None
+        conservative_reclaim = int(sample.chrome_rss_bytes * _CHROME_CONSERVATIVE_RECLAIM_RATIO)
+        lines = [
+            f"Chrome processes:          {sample.chrome_process_count}",
+            f"Chrome RSS:                {_format_gib(sample.chrome_rss_bytes)}",
+            f"Current available RAM:     {_format_gib(sample.available_ram_bytes)}",
+            f"Total system RAM:          {_format_gib(sample.total_ram_bytes)}",
+            f"Fresh resource admission:  {decision_text}",
+        ]
+        if assessment is not None:
+            lines.extend((
+                f"Configured RAM reserve:    {_format_gib(assessment.ram_reserved_bytes)}",
+                f"Candidate RAM request:     {_format_gib(assessment.ram_required_bytes)}",
+                ("Current RAM shortfall:      none" if shortfall == 0
+                 else f"Current RAM shortfall:     {_format_gib(shortfall)}"),
+            ))
+        else:
+            lines.append("Authoritative RAM shortfall is unavailable; projections are not classified.")
+
+        chrome_negligible = sample.chrome_rss_bytes <= _CHROME_CLOSED_RSS_THRESHOLD_BYTES
+        if chrome_negligible:
+            lines.extend(("", "[-] Chrome is not currently consuming meaningful RAM."))
+        elif shortfall is not None:
+            lines.extend((
+                f"Conservative reclaim estimate (60% RSS): {_format_gib(conservative_reclaim)}",
+                f"Full RSS upper bound:                    {_format_gib(sample.chrome_rss_bytes)}",
+                "    These are predictions, not guarantees of immediately reclaimable Windows RAM.",
+                "",
+            ))
+            if decision is ResourceDecision.ALLOW or shortfall == 0:
+                lines.extend((
+                    "[~] Chrome is using RAM, but fresh authoritative admission no longer has a RAM shortfall.",
+                    "    The scheduler may retry when its timer permits.",
+                ))
+            elif conservative_reclaim >= shortfall:
+                lines.extend((
+                    "[!] Chrome is likely a major contributor to this RAM wait.",
+                    "[\u2713] Closing Chrome should likely resolve the current admission shortage.",
+                    "    A fresh post-close assessment remains authoritative.",
+                ))
+            elif sample.chrome_rss_bytes >= shortfall:
+                lines.extend((
+                    "[~] Closing Chrome may resolve the RAM wait, but full RSS may not become immediately available.",
+                    "    A fresh post-close assessment remains authoritative.",
+                ))
+            else:
+                remaining = shortfall - sample.chrome_rss_bytes
+                lines.extend((
+                    "[!] Closing Chrome alone is unlikely to resolve the RAM wait.",
+                    f"    Additional RAM still required after the full-RSS upper bound: about {_format_gib(remaining)}",
+                ))
+
+        previous = self._previous_ram_sample
+        if (
+            previous is not None
+            and previous.chrome_rss_bytes >= _CHROME_SIGNIFICANT_RSS_BYTES
+            and sample.chrome_rss_bytes <= _CHROME_CLOSED_RSS_THRESHOLD_BYTES
+        ):
+            gain = sample.available_ram_bytes - previous.available_ram_bytes
+            sign = "+" if gain >= 0 else "-"
+            change = "increased" if gain >= 0 else "decreased"
+            lines.extend(("", "CHROME CHANGE DETECTED"))
+            if sample.chrome_process_count == 0:
+                lines.append("[\u2713] Chrome was closed.")
+            else:
+                lines.append("[\u2713] Chrome memory dropped to negligible background usage.")
+            lines.append(f"    Available RAM {change} by {sign}{_format_gib(abs(gain))}.")
+            if decision is ResourceDecision.ALLOW:
+                lines.extend((
+                    "[\u2713] The current resource-admission condition is resolved.",
+                    "    T/TEA can retry when the scheduler/retry timer permits.",
+                ))
+            elif decision is ResourceDecision.DELAY:
+                if gain > 0:
+                    lines.append("[!] Closing Chrome improved available resources, but the resource condition is still not satisfied.")
+                else:
+                    lines.append("[!] Chrome memory dropped, but available RAM did not improve and the resource condition is still not satisfied.")
+            elif decision is ResourceDecision.DENY:
+                lines.append("[!] Fresh authoritative admission is DENY; inspect the recorded static constraint.")
+            else:
+                lines.append("[~] Post-close admission could not be assessed; the observed RAM increase is informational only.")
+        self._previous_ram_sample = sample
+        return lines
 
     def render(self, snapshot: TournamentWatchSnapshot) -> str:
         campaign = snapshot.campaign
@@ -518,6 +713,21 @@ class TournamentChecklistRenderer:
                 f"[{symbol}] {candidate_id:<25} {label}{suffix}"
             )
 
+        if (
+            state == "WAITING_FOR_RESOURCES"
+            and _is_ram_wait(reason)
+        ):
+            ram_context = (campaign.tournament_id, current_id)
+            if self._previous_ram_context != ram_context:
+                self._previous_ram_sample = None
+            self._previous_ram_context = ram_context
+            lines.extend(("", "RAM WAIT DIAGNOSTIC", ""))
+            lines.extend(self._render_ram_wait_diagnostic(snapshot))
+
+        if state != "WAITING_FOR_RESOURCES" or not _is_ram_wait(reason):
+            self._previous_ram_sample = None
+            self._previous_ram_context = None
+
         lines.extend(("", "STATUS", ""))
 
         if loop_warning:
@@ -564,7 +774,8 @@ def checklist(
         raise ValueError("refresh must be at least 0.5 seconds")
 
     watcher = watcher or TournamentWatcher(root)
-    renderer = TournamentChecklistRenderer()
+    admission_assessor = _admission_probe(watcher) if isinstance(watcher, TournamentWatcher) else None
+    renderer = TournamentChecklistRenderer(admission_assessor=admission_assessor)
 
     try:
         while True:

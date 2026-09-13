@@ -37,6 +37,20 @@ SURVIVAL_RAM_START_HEADROOM_BYTES = 512 * 1024 * 1024
 SURVIVAL_GPU_HEADROOM_BYTES = 256 * 1024 * 1024
 
 
+def survival_resource_request(candidate: TournamentCandidate) -> ResourceRequest:
+    """Build the canonical, provider-layer survival admission request."""
+    if not isinstance(candidate, TournamentCandidate):
+        raise ValueError("candidate must be a TournamentCandidate")
+    if candidate.variant.provider != "ollama":
+        raise ValueError("survival request requires an Ollama candidate")
+    return ResourceRequest(
+        workload_type=f"tournament-survival:{candidate.candidate_id}",
+        estimated_ram_bytes=SURVIVAL_RAM_START_HEADROOM_BYTES,
+        estimated_disk_bytes=0,
+        estimated_gpu_vram_bytes=SURVIVAL_GPU_HEADROOM_BYTES,
+    )
+
+
 class ProvisioningDeferred(RuntimeError):
     """A missing candidate cannot be acquired under the persisted policy."""
 
@@ -145,12 +159,7 @@ class OllamaTournamentProvider(TournamentProvider):
         VRAM, and thermal pressure during model load and inference.
         """
         self._require_candidate(candidate)
-        return ResourceRequest(
-            workload_type=f"tournament-survival:{candidate.candidate_id}",
-            estimated_ram_bytes=SURVIVAL_RAM_START_HEADROOM_BYTES,
-            estimated_disk_bytes=0,
-            estimated_gpu_vram_bytes=SURVIVAL_GPU_HEADROOM_BYTES,
-        )
+        return survival_resource_request(candidate)
 
 
     def provisioning_resource_request(self, candidate: TournamentCandidate) -> ResourceRequest:

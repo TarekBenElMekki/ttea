@@ -677,6 +677,108 @@ class TournamentSurvivalTests(unittest.TestCase):
             candidate.estimated_disk_bytes,
         )
 
+    def test_runtime_resource_pressure_then_success_is_bounded_and_reuses_provisioning(self):
+        pressure = SurvivalExecutionResult(
+            benchmark(BenchmarkOutcome.RESOURCE_PRESSURE),
+            {"ram_minimum_available_bytes": 100}, True, True, True,
+        )
+        success = SurvivalExecutionResult(
+            benchmark(), {"ram_minimum_available_bytes": 200}, True, True, True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result, _, provider, _ = self.run_engine(
+                directory, executions=(pressure, success),
+            )
+        record = next(iter(result.records.values()))
+        self.assertIs(record.outcome, SurvivalOutcome.PASSED)
+        self.assertEqual(record.attempt_count, 2)
+        self.assertEqual(len(provider.execute_calls), 2)
+        self.assertEqual(len(provider.provision_calls), 1)
+
+    def test_repeated_runtime_resource_pressure_eliminates_at_default_bound(self):
+        first = SurvivalExecutionResult(
+            BenchmarkResult(
+                BenchmarkOutcome.RESOURCE_PRESSURE,
+                ("available RAM remained below the reserved RAM threshold",),
+                NOW, NOW + timedelta(seconds=1), 321, None, True,
+            ),
+            {"sample": 1}, True, True, True,
+        )
+        second = SurvivalExecutionResult(
+            BenchmarkResult(
+                BenchmarkOutcome.RESOURCE_PRESSURE,
+                ("runtime RAM reserve crossed again",),
+                NOW, NOW + timedelta(seconds=1), 654, None, True,
+            ),
+            {"sample": 2}, True, True, True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result, _, provider, _ = self.run_engine(
+                directory, executions=(first, second),
+            )
+        record = next(iter(result.records.values()))
+        self.assertIs(record.outcome, SurvivalOutcome.ELIMINATED)
+        self.assertEqual(record.attempt_count, 2)
+        self.assertEqual(len(provider.execute_calls), 2)
+        self.assertEqual(len(provider.provision_calls), 1)
+        self.assertIn("RESOURCE_DENIED", record.reason)
+        self.assertIn("candidate/runtime configuration", record.reason)
+        self.assertIn("runtime RAM reserve crossed again", record.reason)
+        self.assertEqual(record.metrics["sample"], 2)
+        self.assertEqual(record.worker_pid, 654)
+        self.assertTrue(record.cleanup_verified)
+        self.assertTrue(record.resource_recovery_verified)
+        self.assertTrue(record.default_server_identity_preserved)
+
+    def test_repeated_pressure_eliminates_first_then_scheduler_runs_second(self):
+        pressure = SurvivalExecutionResult(
+            benchmark(BenchmarkOutcome.RESOURCE_PRESSURE), {}, True, True, True,
+        )
+        success = SurvivalExecutionResult(benchmark(), {}, True, True, True)
+        with tempfile.TemporaryDirectory() as directory:
+            result, _, provider, _ = self.run_engine(
+                directory, count=2, executions=(pressure, pressure, success),
+            )
+        records = tuple(result.records.values())
+        self.assertIs(records[0].outcome, SurvivalOutcome.ELIMINATED)
+        self.assertIn("RESOURCE_DENIED", records[0].reason)
+        self.assertIs(records[1].outcome, SurvivalOutcome.PASSED)
+        self.assertEqual(provider.execute_calls,
+                         [records[0].candidate_id, records[0].candidate_id, records[1].candidate_id])
+
+    def test_pre_execution_delay_does_not_consume_runtime_pressure_attempt(self):
+        pressure = SurvivalExecutionResult(
+            benchmark(BenchmarkOutcome.RESOURCE_PRESSURE), {}, True, True, True,
+        )
+        success = SurvivalExecutionResult(benchmark(), {}, True, True, True)
+        with tempfile.TemporaryDirectory() as directory:
+            result, _, provider, resources = self.run_engine(
+                directory,
+                decisions=(ResourceDecision.DELAY, ResourceDecision.ALLOW, ResourceDecision.ALLOW),
+                executions=(pressure, success),
+            )
+        record = next(iter(result.records.values()))
+        self.assertIs(record.outcome, SurvivalOutcome.PASSED)
+        self.assertEqual(record.attempt_count, 2)
+        self.assertEqual(len(provider.execute_calls), 2)
+        self.assertEqual(len(provider.provision_calls), 1)
+        self.assertEqual(len(resources.calls), 3)
+
+    def test_worker_failure_retry_semantics_remain_two_attempts(self):
+        failure = SurvivalExecutionResult(
+            benchmark(BenchmarkOutcome.WORKER_FAILURE), {}, True, True, True,
+        )
+        success = SurvivalExecutionResult(benchmark(), {}, True, True, True)
+        with tempfile.TemporaryDirectory() as directory:
+            result, _, provider, _ = self.run_engine(
+                directory, executions=(failure, success),
+            )
+        record = next(iter(result.records.values()))
+        self.assertIs(record.outcome, SurvivalOutcome.PASSED)
+        self.assertEqual(record.attempt_count, 2)
+        self.assertEqual(len(provider.execute_calls), 2)
+        self.assertEqual(len(provider.provision_calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

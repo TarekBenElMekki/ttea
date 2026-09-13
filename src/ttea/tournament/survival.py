@@ -112,6 +112,8 @@ class SurvivalTournamentEngine:
                  max_runtime_attempts: int = 2) -> None:
         self.tournament_id, self.store, self.provider = tournament_id, store, provider
         self.now, self.sleep = now, sleep
+        if not isinstance(max_runtime_attempts, int) or isinstance(max_runtime_attempts, bool) or max_runtime_attempts <= 0:
+            raise ValueError("max_runtime_attempts must be a positive integer")
         self.max_runtime_attempts = max_runtime_attempts
         self.active_candidates = 0
 
@@ -457,12 +459,38 @@ class SurvivalTournamentEngine:
                         reason = "bounded survival execution and all cleanup gates passed"
                         completed = replace(running, outcome=SurvivalOutcome.PASSED, reason=reason, **common)
                     elif benchmark.outcome is BenchmarkOutcome.RESOURCE_PRESSURE:
-                        campaign = self._record(campaign, replace(running, outcome=SurvivalOutcome.PENDING,
-                                                                  reason="; ".join(benchmark.reasons), **common),
-                                                state=SurvivalCampaignState.RUNNING,
-                                                last_event="runtime resource pressure", last_reason="; ".join(benchmark.reasons))
-                        campaign = self._wait(campaign, candidate.candidate_id, "; ".join(benchmark.reasons))
-                        continue
+                        benchmark_reason = "; ".join(benchmark.reasons)
+                        if running.attempt_count < self.max_runtime_attempts:
+                            campaign = self._record(
+                                campaign,
+                                replace(
+                                    running,
+                                    outcome=SurvivalOutcome.PENDING,
+                                    reason=benchmark_reason,
+                                    **common,
+                                ),
+                                state=SurvivalCampaignState.RUNNING,
+                                last_event="runtime resource pressure",
+                                last_reason=benchmark_reason,
+                            )
+                            campaign = self._wait(
+                                campaign,
+                                candidate.candidate_id,
+                                benchmark_reason,
+                            )
+                            continue
+                        reason = (
+                            "RESOURCE_DENIED: candidate/runtime configuration "
+                            "could not maintain this machine's configured resource "
+                            f"safety reserve after {running.attempt_count} admitted "
+                            f"execution attempts; benchmark reasons: {benchmark_reason}"
+                        )
+                        completed = replace(
+                            running,
+                            outcome=SurvivalOutcome.ELIMINATED,
+                            reason=reason,
+                            **common,
+                        )
                     elif benchmark.outcome is BenchmarkOutcome.WORKER_FAILURE and running.attempt_count < self.max_runtime_attempts:
                         campaign = self._record(campaign, replace(running, outcome=SurvivalOutcome.INTERRUPTED,
                                                                   reason="; ".join(benchmark.reasons), **common),
