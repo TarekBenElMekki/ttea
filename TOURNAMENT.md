@@ -33,3 +33,7 @@ Selection produces independent primary, low-resource fallback, and optional reas
 ## Inspection
 
 The read-only CLI can list persisted tournaments, show status, render reports, and inspect manifest metadata. `start` always refuses with `execution not enabled in framework milestone`. A compact immutable snapshot API exposes cursor, progress, wait state, latest scores, and latest elimination for a future monitor without adding a watch UI now.
+
+## Initial 2026 Candidate Catalog
+
+The declarative September 2026 catalog records official Ollama library tags, published package sizes, expected quantization, roles, and provisional tier-based planning capacity. Inclusion is research coverage, not endorsement: actual hardware suitability remains unknown until survival testing, published package size is not runtime RAM, and all real hardware measurements come only from tournament evidence. The first round uses 4K contexts; quantization expansion is reserved for finalists.

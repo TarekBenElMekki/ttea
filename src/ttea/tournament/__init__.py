@@ -1,6 +1,12 @@
 """Public contracts for T/TEA's inert local-model tournament framework."""
 
 from .manifest import ManifestError, ManifestMismatchError, SAFETY_CANDIDATE, TournamentManifest
+from .catalog import (
+    CATALOG_BY_ID, CATALOG_SOURCE, CONTEXT_TARGET, INITIAL_CATALOG,
+    REAL_CANDIDATES, REAL_CATALOG, RESEARCH_DATE, SAFETY_CATALOG_ENTRY,
+    TIER_MEMBERSHIP, TIER_RESOURCE_ESTIMATES, CandidateCatalogEntry,
+    ProvisionalResourceEstimate, ResearchTier, build_real_candidate_manifest,
+)
 from .models import (
     DIMENSIONS, MAX_CONCURRENCY, PERFORMANCE_METRICS, SCHEMA_VERSION, AttemptStatus, CandidateRoundResult,
     CandidateState, CandidateVariant, EliminationReason, EliminationRecord,
@@ -32,16 +38,16 @@ from .store import (
 )
 
 __all__ = (
-    "AttemptConflictError", "AttemptStatus", "AttemptTransitionError", "CandidateRoundResult", "CandidateState", "CandidateTransitionError",
-    "CandidateVariant", "DIMENSIONS", "EliminationReason", "EliminationRecord", "EvidenceConflictError", "MAX_CONCURRENCY", "PERFORMANCE_METRICS",
+    "AttemptConflictError", "AttemptStatus", "AttemptTransitionError", "CATALOG_BY_ID", "CATALOG_SOURCE", "CONTEXT_TARGET", "CandidateCatalogEntry", "CandidateRoundResult", "CandidateState", "CandidateTransitionError",
+    "CandidateVariant", "DIMENSIONS", "EliminationReason", "EliminationRecord", "EvidenceConflictError", "INITIAL_CATALOG", "MAX_CONCURRENCY", "PERFORMANCE_METRICS", "ProvisionalResourceEstimate",
     "ManifestError", "ManifestMismatchError", "PersistedTournament", "ProviderAvailability",
-    "ProviderMetadata", "ProvisioningEligibility", "ResultConflictError", "SCHEMA_VERSION",
+    "ProviderMetadata", "ProvisioningEligibility", "REAL_CANDIDATES", "REAL_CATALOG", "RESEARCH_DATE", "ResearchTier", "ResultConflictError", "SAFETY_CATALOG_ENTRY", "SCHEMA_VERSION",
     "SchedulerDecision", "SelectionPolicy", "SelectionRole", "TaskResult", "TimestampRegressionError", "TournamentAttempt",
     "TournamentCandidate", "TournamentExecutionDisabled", "TournamentExecutionRequest",
     "TournamentIntegrityError", "TournamentManifest", "TournamentPhase", "TournamentProvider", "TournamentResult",
     "TournamentRound", "TournamentSelection", "TournamentSerializationError", "TournamentSnapshot",
     "TournamentState", "TournamentStore", "TournamentStoreError", "TournamentTask",
-    "TournamentTransitionError", "TournamentWorkItem", "WorkDisposition", "aggregate_round", "apply_scheduler_decision", "attempt_id", "calculate_progress",
+    "TIER_MEMBERSHIP", "TIER_RESOURCE_ESTIMATES", "TournamentTransitionError", "TournamentWorkItem", "WorkDisposition", "aggregate_round", "apply_scheduler_decision", "attempt_id", "build_real_candidate_manifest", "calculate_progress",
     "composite", "eliminate_candidate", "execute", "next_work", "ordered_work",
     "recover_stale_attempts", "require_attempt_transition", "require_candidate_transition", "require_transition", "retry_attempt",
     "resume_interrupted", "schedule_resource_decision", "select", "snapshot", "task_result_id",
