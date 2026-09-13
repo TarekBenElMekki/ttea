@@ -15,6 +15,7 @@ from .store import TournamentStore, TournamentStoreError
 from .supervisor import TournamentSupervisorManager, supervise_tournament
 from .survival import survival_report_text
 from .watch import watch
+from .checklist_watch import checklist
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -37,6 +38,9 @@ def _parser() -> argparse.ArgumentParser:
     monitor.add_argument("--refresh", type=float, default=2.0)
     monitor.add_argument("--once", action="store_true")
     monitor.add_argument("--json", action="store_true")
+    checklist_monitor = commands.add_parser("checklist")
+    checklist_monitor.add_argument("--refresh", type=float, default=2.0)
+    checklist_monitor.add_argument("--once", action="store_true")
     supervise = commands.add_parser("_supervise", help=argparse.SUPPRESS)
     supervise.add_argument("--tournament-id", required=True)
     supervise.add_argument("--claim-token", required=True)
@@ -89,6 +93,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "watch":
             return watch(arguments.root, refresh_seconds=arguments.refresh,
                          once=arguments.once, json_output=arguments.json)
+        if arguments.command == "checklist":
+            return checklist(arguments.root, refresh_seconds=arguments.refresh,
+                             once=arguments.once)
         if arguments.command == "list":
             executions = survival_store.list()
             if executions:
