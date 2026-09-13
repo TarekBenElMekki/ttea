@@ -33,7 +33,7 @@ DEDICATED_OLLAMA_PORT = 11435
 # Survival admission is deliberately separate from catalog research-tier
 # estimates. These values represent minimum safe headroom for attempting a
 # CPU/GPU-offloaded cold load; actual RAM/VRAM use is measured empirically.
-SURVIVAL_RUNTIME_OVERHEAD_BYTES = 1024 * 1024 * 1024
+SURVIVAL_RAM_START_HEADROOM_BYTES = 512 * 1024 * 1024
 SURVIVAL_GPU_HEADROOM_BYTES = 256 * 1024 * 1024
 
 
@@ -132,24 +132,26 @@ class OllamaTournamentProvider(TournamentProvider):
         availability = self.availability(candidate)
         return ProvisioningEligibility(availability.available, availability.reason)
 
-    def resource_request(self, candidate: TournamentCandidate, tournament_round: TournamentRound,
-                         task: TournamentTask) -> ResourceRequest:
+    def resource_request(
+        self,
+        candidate: TournamentCandidate,
+        tournament_round: TournamentRound,
+        task: TournamentTask,
+    ) -> ResourceRequest:
+        """Admission headroom for starting measured survival execution.
+
+        Published model package size remains catalog/disk metadata and is not
+        treated as runtime RAM. The BenchmarkSupervisor observes real RAM,
+        VRAM, and thermal pressure during model load and inference.
+        """
         self._require_candidate(candidate)
-        if tournament_round.phase.value != "SURVIVAL" or task.task_id not in tournament_round.task_ids:
-            raise ValueError("only a persisted survival-round task may execute")
-
-        # Catalog RAM/VRAM estimates are research/planning metadata and must not
-        # become hard admission requirements. Survival uses a CPU-offload-aware
-        # minimum request and lets BenchmarkSupervisor measure real pressure.
-        published_bytes = candidate.estimated_disk_bytes or 0
-        survival_ram_bytes = published_bytes + SURVIVAL_RUNTIME_OVERHEAD_BYTES
-
         return ResourceRequest(
             workload_type=f"tournament-survival:{candidate.candidate_id}",
-            estimated_ram_bytes=survival_ram_bytes,
+            estimated_ram_bytes=SURVIVAL_RAM_START_HEADROOM_BYTES,
             estimated_disk_bytes=0,
             estimated_gpu_vram_bytes=SURVIVAL_GPU_HEADROOM_BYTES,
         )
+
 
     def provisioning_resource_request(self, candidate: TournamentCandidate) -> ResourceRequest:
         self._require_candidate(candidate)

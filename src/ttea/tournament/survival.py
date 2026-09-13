@@ -190,6 +190,7 @@ class SurvivalTournamentEngine:
         manifest = self.provider.manifest
         tournament_round = manifest.round("survival_4k")
         task = manifest.task(tournament_round.task_ids[0])
+        verified_this_run: set[str] = set()
         try:
             campaign = self._save(replace(campaign, state=SurvivalCampaignState.RUNNING,
                                           updated_at=self.now(), heartbeat_at=self.now(),
@@ -204,84 +205,173 @@ class SurvivalTournamentEngine:
                     record = campaign.records[candidate.candidate_id]
                     if record.outcome in TERMINAL_CANDIDATE_OUTCOMES:
                         break
-                    self._event(campaign, "candidate selected", candidate.candidate_id)
-                    record = replace(record, provisioning_state=ProvisioningState.INSPECTING,
-                                     reason="inspecting exact manifest tag")
-                    campaign = self._record(campaign, record, state=SurvivalCampaignState.RUNNING,
-                                            current_candidate_id=candidate.candidate_id,
-                                            last_event="candidate selected", last_reason=record.reason)
-                    try:
-                        evidence = self.provider.provision(
-                            candidate, record.provisioning,
-                            acquisition_preflight=self.provider.resource_manager.assess,
-                        )
-                    except (ProvisioningResourceDelayed, ProvisioningRuntimeDelayed) as exc:
-                        campaign = self._wait(campaign, candidate.candidate_id, str(exc))
-                        if campaign.state is SurvivalCampaignState.CANCELLED:
-                            return campaign
-                        continue
-                    except ProvisioningDeferred as exc:
-                        blocked = replace(record, provisioning_state=ProvisioningState.BLOCKED,
-                                          outcome=SurvivalOutcome.BLOCKED, reason=str(exc))
-                        campaign = self._record(campaign, blocked, state=SurvivalCampaignState.RUNNING,
-                                                last_event="provisioning blocked", last_reason=str(exc))
-                        self._event(campaign, "provisioning blocked", _event_reason(candidate.candidate_id, str(exc)))
-                        break
-                    except ProvisioningResourceDenied as exc:
-                        eliminated = replace(record, provisioning_state=ProvisioningState.FAILED,
-                                             outcome=SurvivalOutcome.ELIMINATED,
-                                             reason=f"{EliminationReason.RESOURCE_DENIED.value}: {exc}")
-                        campaign = self._record(campaign, eliminated, state=SurvivalCampaignState.RUNNING,
-                                                last_event="candidate eliminated", last_reason=eliminated.reason)
-                        self._event(campaign, "candidate eliminated", _event_reason(candidate.candidate_id, eliminated.reason))
-                        break
-                    except ProvisioningRejected as exc:
-                        eliminated = replace(
-                            record,
-                            provisioning_state=ProvisioningState.FAILED,
-                            outcome=SurvivalOutcome.ELIMINATED,
-                            reason=f"{EliminationReason.POLICY_VIOLATION.value}: {exc}",
-                        )
-                        campaign = self._record(
-                            campaign,
-                            eliminated,
-                            state=SurvivalCampaignState.RUNNING,
-                            last_event="candidate eliminated",
-                            last_reason=eliminated.reason,
-                        )
-                        self._event(
-                            campaign,
-                            "candidate eliminated",
-                            _event_reason(candidate.candidate_id, eliminated.reason),
-                        )
-                        break
-                    except Exception as exc:
-                        eliminated = replace(
-                            record,
-                            provisioning_state=ProvisioningState.FAILED,
-                            outcome=SurvivalOutcome.ELIMINATED,
-                            reason=f"{EliminationReason.RUNTIME_FAILED.value}: {exc}",
-                        )
-                        campaign = self._record(
-                            campaign,
-                            eliminated,
-                            state=SurvivalCampaignState.RUNNING,
-                            last_event="candidate eliminated",
-                            last_reason=eliminated.reason,
-                        )
-                        self._event(
-                            campaign,
-                            "candidate eliminated",
-                            _event_reason(candidate.candidate_id, eliminated.reason),
-                        )
-                        break
+                    reuse_verified = (
+                        candidate.candidate_id in verified_this_run
+                        and record.provisioning_state is ProvisioningState.VERIFIED
+                        and record.provisioning is not None
+                    )
 
-                    record = replace(record, provisioning_state=ProvisioningState.VERIFIED,
-                                     provisioning=evidence, outcome=SurvivalOutcome.PENDING,
-                                     reason="exact model metadata verified")
-                    campaign = self._record(campaign, record, state=SurvivalCampaignState.RUNNING,
-                                            last_event="metadata verified", last_reason=record.reason)
-                    self._event(campaign, "metadata verified", candidate.candidate_id)
+                    if reuse_verified:
+                        evidence = record.provisioning
+                    else:
+                        self._event(
+                            campaign,
+                            "candidate selected",
+                            candidate.candidate_id,
+                        )
+
+                        record = replace(
+                            record,
+                            provisioning_state=ProvisioningState.INSPECTING,
+                            reason="inspecting exact manifest tag",
+                        )
+                        campaign = self._record(
+                            campaign,
+                            record,
+                            state=SurvivalCampaignState.RUNNING,
+                            current_candidate_id=candidate.candidate_id,
+                            last_event="candidate selected",
+                            last_reason=record.reason,
+                        )
+
+                        try:
+                            evidence = self.provider.provision(
+                                candidate,
+                                record.provisioning,
+                                acquisition_preflight=self.provider.resource_manager.assess,
+                            )
+                        except (
+                            ProvisioningResourceDelayed,
+                            ProvisioningRuntimeDelayed,
+                        ) as exc:
+                            campaign = self._wait(
+                                campaign,
+                                candidate.candidate_id,
+                                str(exc),
+                            )
+                            if campaign.state is SurvivalCampaignState.CANCELLED:
+                                return campaign
+                            continue
+                        except ProvisioningDeferred as exc:
+                            blocked = replace(
+                                record,
+                                provisioning_state=ProvisioningState.BLOCKED,
+                                outcome=SurvivalOutcome.BLOCKED,
+                                reason=str(exc),
+                            )
+                            campaign = self._record(
+                                campaign,
+                                blocked,
+                                state=SurvivalCampaignState.RUNNING,
+                                last_event="provisioning blocked",
+                                last_reason=blocked.reason,
+                            )
+                            self._event(
+                                campaign,
+                                "provisioning blocked",
+                                _event_reason(
+                                    candidate.candidate_id,
+                                    blocked.reason,
+                                ),
+                            )
+                            break
+                        except ProvisioningResourceDenied as exc:
+                            eliminated = replace(
+                                record,
+                                provisioning_state=ProvisioningState.FAILED,
+                                outcome=SurvivalOutcome.ELIMINATED,
+                                reason=(
+                                    f"{EliminationReason.RESOURCE_DENIED.value}: "
+                                    f"{exc}"
+                                ),
+                            )
+                            campaign = self._record(
+                                campaign,
+                                eliminated,
+                                state=SurvivalCampaignState.RUNNING,
+                                last_event="candidate eliminated",
+                                last_reason=eliminated.reason,
+                            )
+                            self._event(
+                                campaign,
+                                "candidate eliminated",
+                                _event_reason(
+                                    candidate.candidate_id,
+                                    eliminated.reason,
+                                ),
+                            )
+                            break
+                        except ProvisioningRejected as exc:
+                            blocked = replace(
+                                record,
+                                provisioning_state=ProvisioningState.BLOCKED,
+                                outcome=SurvivalOutcome.BLOCKED,
+                                reason=f"CONFIGURATION_MISMATCH: {exc}",
+                            )
+                            campaign = self._record(
+                                campaign,
+                                blocked,
+                                state=SurvivalCampaignState.RUNNING,
+                                last_event="provisioning blocked",
+                                last_reason=blocked.reason,
+                            )
+                            self._event(
+                                campaign,
+                                "provisioning blocked",
+                                _event_reason(
+                                    candidate.candidate_id,
+                                    blocked.reason,
+                                ),
+                            )
+                            break
+                        except Exception as exc:
+                            eliminated = replace(
+                                record,
+                                provisioning_state=ProvisioningState.FAILED,
+                                outcome=SurvivalOutcome.ELIMINATED,
+                                reason=(
+                                    f"{EliminationReason.RUNTIME_FAILED.value}: "
+                                    f"{exc}"
+                                ),
+                            )
+                            campaign = self._record(
+                                campaign,
+                                eliminated,
+                                state=SurvivalCampaignState.RUNNING,
+                                last_event="candidate eliminated",
+                                last_reason=eliminated.reason,
+                            )
+                            self._event(
+                                campaign,
+                                "candidate eliminated",
+                                _event_reason(
+                                    candidate.candidate_id,
+                                    eliminated.reason,
+                                ),
+                            )
+                            break
+
+                        record = replace(
+                            record,
+                            provisioning_state=ProvisioningState.VERIFIED,
+                            provisioning=evidence,
+                            outcome=SurvivalOutcome.PENDING,
+                            reason="exact model metadata verified",
+                        )
+                        campaign = self._record(
+                            campaign,
+                            record,
+                            state=SurvivalCampaignState.RUNNING,
+                            last_event="metadata verified",
+                            last_reason=record.reason,
+                        )
+                        self._event(
+                            campaign,
+                            "metadata verified",
+                            candidate.candidate_id,
+                        )
+                        verified_this_run.add(candidate.candidate_id)
+
                     resource_request = self.provider.resource_request(candidate, tournament_round, task)
                     assessment = self.provider.resource_manager.assess(resource_request)
                     if assessment.decision is ResourceDecision.DELAY:

@@ -533,7 +533,7 @@ class TournamentSurvivalTests(unittest.TestCase):
         self.assertEqual(request.estimated_gpu_vram_bytes, 256 * 1024 * 1024)
         self.assertEqual(
             request.estimated_ram_bytes,
-            (candidate.estimated_disk_bytes or 0) + 1024 * 1024 * 1024,
+            512 * 1024 * 1024,
         )
         self.assertLess(
             request.estimated_gpu_vram_bytes,
@@ -578,6 +578,104 @@ class TournamentSurvivalTests(unittest.TestCase):
             self.assertIs(record.outcome, SurvivalOutcome.PASSED)
             self.assertEqual(calls["count"], 2)
             self.assertNotIn("RUNTIME_FAILED", record.reason or "")
+
+
+    def test_qwen35_catalog_quantization_and_explicit_q4_tag(self):
+        manifest = build_survival_manifest()
+        candidates = {
+            candidate.candidate_id: candidate
+            for candidate in manifest.candidates
+        }
+
+        qwen08 = candidates["qwen35-08b"]
+        self.assertEqual(qwen08.variant.model, "qwen3.5:0.8b")
+        self.assertEqual(qwen08.variant.quantization, "Q8_0")
+        self.assertEqual(qwen08.estimated_disk_bytes, 1_000_000_000)
+
+        qwen2 = candidates["qwen35-2b"]
+        self.assertEqual(
+            qwen2.variant.model,
+            "qwen3.5:2b-q4_K_M",
+        )
+        self.assertEqual(qwen2.variant.quantization, "Q4_K_M")
+        self.assertEqual(qwen2.estimated_disk_bytes, 1_900_000_000)
+
+    def test_metadata_mismatch_blocks_without_model_elimination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, campaign, manifest, policy = self.create(directory)
+            resources = FakeResourceManager()
+            provider = FakeProvider(manifest, resources, policy)
+
+            def reject_metadata(
+                candidate,
+                prior=None,
+                acquisition_preflight=None,
+            ):
+                raise ProvisioningRejected(
+                    "installed model quantization does not match manifest"
+                )
+
+            provider.provision = reject_metadata
+            clock = Clock()
+
+            result = SurvivalTournamentEngine(
+                campaign.tournament_id,
+                store,
+                provider,
+                now=clock.now,
+                sleep=clock.sleep,
+            ).run()
+
+            record = next(iter(result.records.values()))
+
+            self.assertIs(record.outcome, SurvivalOutcome.BLOCKED)
+            self.assertIs(
+                record.provisioning_state,
+                ProvisioningState.BLOCKED,
+            )
+            self.assertIn("CONFIGURATION_MISMATCH", record.reason)
+            self.assertEqual(provider.execute_calls, [])
+
+    def test_resource_retry_does_not_reprovision_verified_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result, _, provider, resources = self.run_engine(
+                directory,
+                decisions=(
+                    ResourceDecision.DELAY,
+                    ResourceDecision.ALLOW,
+                ),
+            )
+
+        record = next(iter(result.records.values()))
+
+        self.assertIs(record.outcome, SurvivalOutcome.PASSED)
+        self.assertEqual(len(provider.provision_calls), 1)
+        self.assertGreaterEqual(len(resources.calls), 2)
+
+    def test_real_survival_request_uses_bounded_startup_headroom(self):
+        manifest = self.manifest()
+        candidate = manifest.candidates[0]
+        provider = self.provider(manifest)
+
+        request = provider.resource_request(
+            candidate,
+            manifest.rounds[0],
+            manifest.tasks[0],
+        )
+
+        self.assertEqual(
+            request.estimated_ram_bytes,
+            512 * 1024 * 1024,
+        )
+        self.assertEqual(request.estimated_disk_bytes, 0)
+        self.assertEqual(
+            request.estimated_gpu_vram_bytes,
+            256 * 1024 * 1024,
+        )
+        self.assertLess(
+            request.estimated_ram_bytes,
+            candidate.estimated_disk_bytes,
+        )
 
 
 if __name__ == "__main__":

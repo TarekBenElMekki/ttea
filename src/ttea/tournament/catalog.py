@@ -140,8 +140,8 @@ def _entry(
 
 
 REAL_CATALOG: tuple[CandidateCatalogEntry, ...] = (
-    _entry("qwen35-08b", "qwen3.5:0.8b", "qwen3.5", "0.8B", "Q4_K_M", 1.0, "ultra-light agent candidate", ResearchTier.LIGHT, "ultra-light agent research"),
-    _entry("qwen35-2b", "qwen3.5:2b", "qwen3.5", "2B class", "Q4_K_M", 2.7, "balanced agent candidate", ResearchTier.BALANCED, "balanced agent research"),
+    _entry("qwen35-08b", "qwen3.5:0.8b", "qwen3.5", "0.8B", "Q8_0", 1.0, "ultra-light agent candidate", ResearchTier.LIGHT, "ultra-light agent research"),
+    _entry("qwen35-2b", "qwen3.5:2b-q4_K_M", "qwen3.5", "2B class", "Q4_K_M", 1.9, "balanced agent candidate", ResearchTier.BALANCED, "balanced agent research"),
     _entry("qwen35-4b", "qwen3.5:4b-q4_K_M", "qwen3.5", "4.66B", "Q4_K_M", 3.4, "upper-end primary candidate", ResearchTier.UPPER, "upper capacity candidate"),
     _entry("qwen3-17b", "qwen3:1.7b-q4_K_M", "qwen3", "1.7B", "Q4_K_M", 1.4, "lightweight previous-generation control", ResearchTier.LIGHT, "previous-generation control"),
     _entry("qwen3-4b-instruct", "qwen3:4b-instruct-2507-q4_K_M", "qwen3", "4.02B", "Q4_K_M", 2.5, "strong instruction/tool baseline", ResearchTier.UPPER, "instruction and tool baseline"),
