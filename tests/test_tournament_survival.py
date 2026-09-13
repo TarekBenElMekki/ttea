@@ -16,7 +16,8 @@ from ttea.resources import ResourceDecision, ResourceRequest
 from ttea.tournament import (
     CandidateSurvivalRecord, CandidateVariant, OllamaTournamentProvider,
     ProvisioningDeferred, ProvisioningEvidence, ProvisioningRejected,
-    ProvisioningState, SurvivalCampaign, SurvivalCampaignState,
+    ProvisioningRuntimeDelayed, ProvisioningState,
+    SurvivalCampaign, SurvivalCampaignState,
     SurvivalExecutionPolicy, SurvivalExecutionResult, SurvivalOutcome,
     SurvivalStore, SurvivalTournamentEngine, TournamentCandidate,
     TournamentManifest, TournamentSupervisorManager, build_survival_manifest,
@@ -538,6 +539,45 @@ class TournamentSurvivalTests(unittest.TestCase):
             request.estimated_gpu_vram_bytes,
             candidate.estimated_vram_bytes,
         )
+
+
+    def test_transient_owned_runtime_startup_retries_without_elimination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, campaign, manifest, policy = self.create(directory)
+            resources = FakeResourceManager()
+            provider = FakeProvider(manifest, resources, policy)
+            original_provision = provider.provision
+            calls = {"count": 0}
+
+            def flaky_provision(candidate, prior=None, acquisition_preflight=None):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise ProvisioningRuntimeDelayed(
+                        "owned Ollama server startup failed: "
+                        "owned Ollama server startup timed out"
+                    )
+                return original_provision(
+                    candidate,
+                    prior,
+                    acquisition_preflight,
+                )
+
+            provider.provision = flaky_provision
+            clock = Clock()
+
+            result = SurvivalTournamentEngine(
+                campaign.tournament_id,
+                store,
+                provider,
+                now=clock.now,
+                sleep=clock.sleep,
+            ).run()
+
+            record = next(iter(result.records.values()))
+            self.assertIs(result.state, SurvivalCampaignState.COMPLETED)
+            self.assertIs(record.outcome, SurvivalOutcome.PASSED)
+            self.assertEqual(calls["count"], 2)
+            self.assertNotIn("RUNTIME_FAILED", record.reason or "")
 
 
 if __name__ == "__main__":

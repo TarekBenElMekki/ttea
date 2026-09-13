@@ -270,7 +270,7 @@ class OwnedOllamaServer:
     """A dedicated Ollama server whose exact process tree is owned by T/TEA."""
 
     def __init__(self, endpoint: OllamaEndpoint, policy: BenchmarkSafetyPolicy, *, executable: str | Path | None = None,
-                 startup_timeout_seconds: float = 15.0, http_timeout_seconds: float = 2.0,
+                 startup_timeout_seconds: float = 45.0, http_timeout_seconds: float = 2.0,
                  process_factory=None, process_api=None, wait_procs=None, command_runner=None,
                  identity_callback=None) -> None:
         _positive_timeout(startup_timeout_seconds, "startup_timeout_seconds")

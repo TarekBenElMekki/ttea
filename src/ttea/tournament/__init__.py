@@ -40,6 +40,7 @@ from .runner import (
 from .ollama_provider import (
     OllamaTournamentProvider, ProvisioningDeferred, ProvisioningRejected,
     ProvisioningResourceDelayed, ProvisioningResourceDenied,
+    ProvisioningRuntimeDelayed,
     SurvivalExecutionResult,
 )
 from .survival import (
@@ -59,7 +60,7 @@ __all__ = (
     "ACTIVE_SURVIVAL_STATES", "AttemptConflictError", "AttemptStatus", "AttemptTransitionError", "CATALOG_BY_ID", "CATALOG_SOURCE", "CONTEXT_TARGET", "CandidateCatalogEntry", "CandidateRoundResult", "CandidateState", "CandidateSurvivalRecord", "CandidateTransitionError",
     "CandidateVariant", "DIMENSIONS", "EliminationReason", "EliminationRecord", "EvidenceConflictError", "INITIAL_CATALOG", "MAX_CONCURRENCY", "PERFORMANCE_METRICS", "ProvisionalResourceEstimate",
     "ManifestError", "ManifestMismatchError", "PersistedTournament", "ProviderAvailability",
-    "OllamaTournamentProvider", "ProviderMetadata", "ProvisioningDeferred", "ProvisioningEligibility", "ProvisioningEvidence", "ProvisioningRejected", "ProvisioningResourceDelayed", "ProvisioningResourceDenied", "ProvisioningState", "REAL_CANDIDATES", "REAL_CATALOG", "RESEARCH_DATE", "ResearchTier", "ResultConflictError", "SAFETY_CATALOG_ENTRY", "SCHEMA_VERSION", "SURVIVAL_PROMPT", "SURVIVAL_ROUND", "SURVIVAL_TASK",
+    "OllamaTournamentProvider", "ProviderMetadata", "ProvisioningDeferred", "ProvisioningEligibility", "ProvisioningEvidence", "ProvisioningRejected", "ProvisioningResourceDelayed", "ProvisioningRuntimeDelayed", "ProvisioningResourceDenied", "ProvisioningState", "REAL_CANDIDATES", "REAL_CATALOG", "RESEARCH_DATE", "ResearchTier", "ResultConflictError", "SAFETY_CATALOG_ENTRY", "SCHEMA_VERSION", "SURVIVAL_PROMPT", "SURVIVAL_ROUND", "SURVIVAL_TASK",
     "SchedulerDecision", "SelectionPolicy", "SelectionRole", "TaskResult", "TimestampRegressionError", "TournamentAttempt",
     "TournamentCandidate", "TournamentExecutionDisabled", "TournamentExecutionRequest",
     "TournamentIntegrityError", "TournamentManifest", "TournamentPhase", "TournamentProvider", "TournamentResult",

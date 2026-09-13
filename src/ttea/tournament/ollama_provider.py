@@ -49,6 +49,10 @@ class ProvisioningResourceDelayed(RuntimeError):
     """Current resources cannot safely support acquisition yet."""
 
 
+class ProvisioningRuntimeDelayed(RuntimeError):
+    """Owned local runtime startup was transiently unavailable."""
+
+
 class ProvisioningResourceDenied(RuntimeError):
     """Static resources cannot support acquisition."""
 
@@ -244,7 +248,10 @@ class OllamaTournamentProvider(TournamentProvider):
         try:
             started = server.start()
             if not started.success:
-                raise OllamaRuntimeError("; ".join(started.reasons))
+                reason = "; ".join(started.reasons)
+                if "startup timed out" in reason.lower():
+                    raise ProvisioningRuntimeDelayed(reason)
+                raise OllamaRuntimeError(reason)
             evidence = self.provision_with_client(server.client(), candidate, prior, acquisition_preflight)
             return evidence
         finally:
@@ -290,7 +297,10 @@ class OllamaTournamentProvider(TournamentProvider):
         try:
             startup = server.start()
             if not startup.success:
-                raise OllamaRuntimeError("; ".join(startup.reasons))
+                reason = "; ".join(startup.reasons)
+                if "startup timed out" in reason.lower():
+                    raise ProvisioningRuntimeDelayed(reason)
+                raise OllamaRuntimeError(reason)
             client = server.client()
             if candidate.variant.model not in client.installed_models():
                 raise ProvisioningRejected("verified candidate is not installed in the owned runtime")

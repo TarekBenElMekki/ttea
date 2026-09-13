@@ -21,6 +21,7 @@ from .models import EliminationReason
 from .ollama_provider import (
     OllamaTournamentProvider, ProvisioningDeferred, ProvisioningRejected,
     ProvisioningResourceDelayed, ProvisioningResourceDenied,
+    ProvisioningRuntimeDelayed,
 )
 from .store import TournamentStore
 
@@ -214,7 +215,7 @@ class SurvivalTournamentEngine:
                             candidate, record.provisioning,
                             acquisition_preflight=self.provider.resource_manager.assess,
                         )
-                    except ProvisioningResourceDelayed as exc:
+                    except (ProvisioningResourceDelayed, ProvisioningRuntimeDelayed) as exc:
                         campaign = self._wait(campaign, candidate.candidate_id, str(exc))
                         if campaign.state is SurvivalCampaignState.CANCELLED:
                             return campaign
@@ -314,7 +315,36 @@ class SurvivalTournamentEngine:
                         raise RuntimeError("sequential invariant violated")
                     self.active_candidates = 1
                     try:
-                        executed = self.provider.execute_survival(candidate, execution_request, resource_request)
+                        try:
+                            executed = self.provider.execute_survival(
+                                candidate, execution_request, resource_request
+                            )
+                        except ProvisioningRuntimeDelayed as exc:
+                            retry_record = replace(
+                                running,
+                                outcome=SurvivalOutcome.INTERRUPTED,
+                                reason=f"transient owned-runtime startup failure: {exc}",
+                            )
+                            campaign = self._record(
+                                campaign,
+                                retry_record,
+                                state=SurvivalCampaignState.RUNNING,
+                                last_event="runtime startup retry",
+                                last_reason=retry_record.reason,
+                            )
+                            self._event(
+                                campaign,
+                                "runtime startup retry",
+                                _event_reason(candidate.candidate_id, retry_record.reason),
+                            )
+                            campaign = self._wait(
+                                campaign,
+                                candidate.candidate_id,
+                                retry_record.reason,
+                            )
+                            if campaign.state is SurvivalCampaignState.CANCELLED:
+                                return campaign
+                            continue
                     finally:
                         self.active_candidates = 0
                     benchmark = executed.benchmark
