@@ -24,6 +24,16 @@ class ValidationSuite:
     guard_factory: Callable[[object], object] | None = None
 
 
+@dataclass(frozen=True)
+class ValidationRunOptions:
+    allow_model_download: bool = False
+    pre_model_passed: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.allow_model_download, bool) or not isinstance(self.pre_model_passed, bool):
+            raise ValueError("validation run options must be bools")
+
+
 class SuiteRegistry:
     def __init__(self) -> None:
         self._suites: dict[str, ValidationSuite] = {}
@@ -49,13 +59,20 @@ class ValidationRunner:
     def __init__(self, registry: SuiteRegistry, report_root: Path = Path("data/validation")) -> None:
         self.registry, self.report_root = registry, report_root
 
-    def run(self, suite_name: str, wait_for_resources_seconds: float = 0.0) -> ValidationRunResult:
+    def run(self, suite_name: str, wait_for_resources_seconds: float = 0.0,
+            options: ValidationRunOptions | None = None) -> ValidationRunResult:
         if not isinstance(wait_for_resources_seconds, (int, float)) or isinstance(wait_for_resources_seconds, bool) or not math.isfinite(wait_for_resources_seconds) or wait_for_resources_seconds < 0:
             raise ValueError("wait_for_resources_seconds must be a finite non-negative number")
         suite = self.registry.get(suite_name)
+        options = options or ValidationRunOptions()
+        if not isinstance(options, ValidationRunOptions):
+            raise ValueError("options must be ValidationRunOptions")
         run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}-{uuid4().hex[:8]}"
         started = datetime.now(timezone.utc)
         context = suite.context_factory()
+        configure = getattr(context, "configure_validation", None)
+        if configure is not None:
+            configure(options)
         guard = suite.guard_factory(context) if suite.guard_factory is not None else None
         results: list[ValidationScenarioResult] = []
         cleanup_verified, interrupted = True, False

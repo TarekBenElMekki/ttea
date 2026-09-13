@@ -19,7 +19,7 @@ def _thaw(value: FrozenJson | Evidence) -> Any:
 
 
 def result_to_dict(result: ValidationRunResult) -> dict[str, Any]:
-    return {
+    payload = {
         "run_id": result.run_id,
         "suite": result.suite,
         "started_at": result.started_at.isoformat(),
@@ -43,6 +43,11 @@ def result_to_dict(result: ValidationRunResult) -> dict[str, Any]:
             for item in result.scenario_results
         ],
     }
+    summary = next((_thaw(item.evidence).get("safety_summary") for item in result.scenario_results
+                    if isinstance(_thaw(item.evidence), dict) and "safety_summary" in _thaw(item.evidence)), None)
+    if summary is not None:
+        payload["safety_summary"] = summary
+    return payload
 
 
 def text_report(result: ValidationRunResult) -> str:
@@ -51,6 +56,25 @@ def text_report(result: ValidationRunResult) -> str:
         lines.append(f"{item.status.value:<8} {item.scenario_id}")
         for reason in item.reasons:
             lines.append(f"         {reason}")
+    summary = next((_thaw(item.evidence).get("safety_summary") for item in result.scenario_results
+                    if isinstance(_thaw(item.evidence), dict) and "safety_summary" in _thaw(item.evidence)), None)
+    if summary is not None:
+        lines.extend(("", "Tiny-model safety summary:"))
+        labels = (
+            ("Model", "model"), ("Digest", "digest"), ("Reported disk size", "size_bytes"),
+            ("Parameter size", "parameter_size"), ("Quantization", "quantization"),
+            ("Normal outcome", "normal_outcome"), ("Evaluated tokens", "eval_count"),
+            ("Tokens/second", "tokens_per_second"), ("RAM delta bytes", "ram_delta_bytes"),
+            ("GPU delta bytes", "gpu_delta_bytes"), ("GPU max temperature C", "gpu_max_temperature_c"),
+            ("Model unload confirmed", "model_unload_confirmed"),
+            ("Server cleanup confirmed", "server_cleanup_confirmed"),
+            ("Forced-timeout outcome", "forced_timeout_outcome"),
+            ("Timeout cleanup verified", "timeout_cleanup_verified"),
+            ("Default server preserved", "default_server_identity_preserved"),
+            ("Resources recovered", "resources_recovered"),
+        )
+        for label, key in labels:
+            lines.append(f"  {label}: {summary.get(key)}")
     lines.extend(("", f"Result: {result.overall_status.value}", f"Cleanup verified: {'YES' if result.cleanup_verified else 'NO'}"))
     return "\n".join(lines) + "\n"
 

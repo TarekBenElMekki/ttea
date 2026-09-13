@@ -104,6 +104,21 @@ class OllamaTests(unittest.TestCase):
         payload = json.loads(urlopen.call_args.args[0].data)
         self.assertEqual(payload, {"model": "exact:tag", "prompt": "", "stream": False, "keep_alive": 0})
 
+    def test_bounded_pull_and_show_model_validation(self):
+        responses = [HttpResponse({"status": "success"}), HttpResponse({"details": {"parameter_size": "135M"}})]
+        with patch("ttea.benchmarking.ollama.http_request.urlopen", side_effect=responses) as urlopen:
+            self.assertEqual(self.client.pull("exact", 12.0)["status"], "success")
+            self.assertIn("details", self.client.show_model("exact", 3.0))
+        pull_request = urlopen.call_args_list[0].args[0]
+        self.assertEqual(json.loads(pull_request.data), {"model": "exact", "stream": False})
+        self.assertEqual(urlopen.call_args_list[0].kwargs["timeout"], 12.0)
+        self.assertEqual(urlopen.call_args_list[1].kwargs["timeout"], 3.0)
+        with patch("ttea.benchmarking.ollama.http_request.urlopen", return_value=HttpResponse({"unexpected": True})):
+            with self.assertRaises(OllamaRuntimeError):
+                self.client.pull("exact", 1.0)
+            with self.assertRaises(OllamaRuntimeError):
+                self.client.show_model("exact")
+
     def test_worker_makes_exactly_one_generation_and_cannot_pull(self):
         client = Mock(spec=["generate"])
         client.generate.return_value = "result"

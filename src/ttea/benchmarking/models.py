@@ -70,6 +70,8 @@ class BenchmarkResult:
     finished_at: datetime
     worker_pid: int | None = None
     worker_result: object | None = None
+    worker_started: bool = False
+    timeout_kind: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, BenchmarkOutcome):
@@ -82,3 +84,11 @@ class BenchmarkResult:
             raise ValueError("finished_at must not precede started_at")
         if self.worker_pid is not None and (not isinstance(self.worker_pid, int) or isinstance(self.worker_pid, bool) or self.worker_pid <= 0):
             raise ValueError("worker_pid must be a positive integer when present")
+        if not isinstance(self.worker_started, bool):
+            raise ValueError("worker_started must be a bool")
+        if self.timeout_kind not in (None, "request", "model"):
+            raise ValueError("timeout_kind must be None, 'request', or 'model'")
+        if self.timeout_kind is not None and self.outcome is not BenchmarkOutcome.TIMEOUT:
+            raise ValueError("timeout_kind is valid only for a TIMEOUT outcome")
+        if self.timeout_kind == "model" and not self.worker_started:
+            raise ValueError("a model timeout requires a started worker")

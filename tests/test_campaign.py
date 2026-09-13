@@ -39,9 +39,10 @@ def validation_result(status, decision=None, *, interrupted=False, cleanup=True,
 
 class FakeRunner:
     def __init__(self, values):
-        self.values, self.calls = list(values), []
-    def run(self, suite):
+        self.values, self.calls, self.options = list(values), [], []
+    def run(self, suite, **kwargs):
         self.calls.append(suite)
+        self.options.append(kwargs.get("options"))
         value = self.values.pop(0)
         if isinstance(value, BaseException):
             raise value
@@ -118,8 +119,9 @@ class CampaignTests(unittest.TestCase):
         registry.register(ValidationSuite("pre_model", (), list))
         manager = CampaignManager(store, registry, self.root / "reports", process_factory, process_api,
                                   benchmark_state_path=self.root / "benchmark.json")
-        result = manager.start("pre_model", detach=True)
+        result = manager.start("pre_model", detach=True, allow_model_download=True)
         self.assertEqual(result.supervisor_pid, 222)
+        self.assertTrue(result.allow_model_download)
         command = process_factory.call_args.args[0]
         self.assertEqual(command[:3], [os.sys.executable, "-m", "ttea.validation"])
         self.assertIn("_supervise", command)
@@ -220,6 +222,24 @@ class CampaignTests(unittest.TestCase):
         result = supervisor.run()
         self.assertIs(result.state, CampaignState.INTERRUPTED)
         self.assertIs(store.load(value.campaign_id).state, CampaignState.INTERRUPTED)
+
+    def test_download_authorization_persists_and_pre_model_pass_advances(self):
+        store = self.store()
+        value = ValidationCampaign(
+            "campaign-through-tiny", ("pre_model", "tiny_model"), "tiny_model", "pre_model",
+            CampaignState.CREATED, NOW, NOW, NOW + timedelta(hours=1), None, None, NOW,
+            allow_model_download=True,
+        )
+        store.create(value)
+        self.assertTrue(store.load(value.campaign_id).allow_model_download)
+        runner = FakeRunner([validation_result(ValidationStatus.PASS, run_id="pre-pass"),
+                             validation_result(ValidationStatus.PASS, run_id="tiny-pass")])
+        completed = CampaignSupervisor(value.campaign_id, store, runner, now=lambda: NOW).run()
+        self.assertIs(completed.state, CampaignState.COMPLETED)
+        self.assertEqual(runner.calls, ["pre_model", "tiny_model"])
+        self.assertFalse(runner.options[0].pre_model_passed)
+        self.assertTrue(runner.options[1].pre_model_passed)
+        self.assertTrue(runner.options[1].allow_model_download)
 
     def test_no_process_name_termination_implementation(self):
         source = (Path(__file__).parents[1] / "src" / "ttea" / "validation" / "campaign.py").read_text(encoding="utf-8")

@@ -430,6 +430,8 @@ class EmergencyRecoveryContractScenario(ValidationScenario):
 
 
 def build_registry() -> SuiteRegistry:
+    from .tiny_model import tiny_model_suite
+
     registry = SuiteRegistry()
     registry.register(ValidationSuite(
         "pre_model",
@@ -439,4 +441,5 @@ def build_registry() -> SuiteRegistry:
         PreModelContext,
         PreModelRunGuard,
     ))
+    registry.register(tiny_model_suite())
     return registry

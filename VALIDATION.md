@@ -37,3 +37,19 @@ Use `campaign status` (or `campaign status --json`) to inspect the persisted hea
 Campaign state and its low-frequency log live under `data/validation/campaigns/<campaign-id>/`. Atomic `campaign.json` updates contain validation run references and resource-wait periods; terminal campaigns also produce `campaign-report.json` and `campaign-report.txt` without duplicating suite reports. A crashed or stale supervisor is marked `INTERRUPTED` by status inspection and remains resumable rather than having its ownership data blindly deleted.
 
 Routine campaigns rely on the same resource, process, port, and cleanup guards as direct validation. The emergency PowerShell script remains fallback recovery only.
+
+## Tiny-model inference safety suite
+
+The `tiny_model` suite validates controlled provisioning, one bounded inference, forced outer-timeout cleanup, and resource recovery. Its only allow-listed asset is `smollm2:135m-instruct-q4_0`, used strictly for safety validation and never treated as an intelligence benchmark candidate; reports identify the installed artifact by digest and reported size as well as name.
+
+Benchmark execution still never pulls models. Acquisition exists only in the validation asset layer, uses a T/TEA-owned Ollama server on loopback port 11435, and posts the exact allow-listed model to the bounded non-streaming local pull API. A campaign may acquire it only when started with explicit persistent authorization:
+
+```powershell
+.\.venv\Scripts\python.exe -m ttea.validation campaign start --through tiny_model --allow-model-download --detach
+```
+
+Without `--allow-model-download`, an already-installed exact model may be validated but a missing model blocks the suite. Download preflight separately checks disk and model-less server resources, allowing provisioning to finish even when the later 512 MiB inference estimate remains delayed. Completed provisioning is retained, so campaign retries inspect the local digest instead of downloading repeatedly.
+
+Inference follows `ResourceManager -> BenchmarkSupervisor -> OllamaBenchmarkWorker` with at most 512 context tokens, 16 generated tokens, two CPU threads, non-streaming output, and zero keep-alive. The forced-timeout scenario uses a much shorter outer model deadline without creating an unbounded request; if both bounded attempts finish too quickly, that scenario is reported as skipped rather than failed.
+
+The suite records Ollama timing/token metrics and derives tokens per second when possible. Existing telemetry cadence captures RAM and VRAM minima plus maximum GPU temperature. Success requires exact-model unload verification, owned process-tree shutdown, port and runtime-state cleanup, preservation of the default server identity, and RAM/VRAM recovery within the documented validation tolerances.

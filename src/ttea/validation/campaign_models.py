@@ -97,6 +97,7 @@ class ValidationCampaign:
     next_retry_at: datetime | None = None
     poll_interval_seconds: float = 30.0
     cancel_requested: bool = False
+    allow_model_download: bool = False
     supervisor_claim_token: str | None = None
     history: tuple[CampaignRunRecord, ...] = ()
     wait_periods: tuple[CampaignWaitPeriod, ...] = ()
@@ -138,6 +139,8 @@ class ValidationCampaign:
             raise ValueError("poll_interval_seconds must be a finite positive number")
         if not isinstance(self.cancel_requested, bool):
             raise ValueError("cancel_requested must be a bool")
+        if not isinstance(self.allow_model_download, bool):
+            raise ValueError("allow_model_download must be a bool")
         _text(self.supervisor_claim_token, "supervisor_claim_token", optional=True)
         if not isinstance(self.history, tuple) or any(not isinstance(item, CampaignRunRecord) for item in self.history):
             raise ValueError("history must be a tuple of CampaignRunRecord values")
@@ -165,6 +168,7 @@ def campaign_to_dict(campaign: ValidationCampaign) -> dict[str, Any]:
         "next_retry_at": None if campaign.next_retry_at is None else campaign.next_retry_at.isoformat(),
         "poll_interval_seconds": campaign.poll_interval_seconds,
         "cancel_requested": campaign.cancel_requested,
+        "allow_model_download": campaign.allow_model_download,
         "supervisor_claim_token": campaign.supervisor_claim_token,
         "history": [
             {"suite": item.suite, "run_id": item.run_id, "status": item.status.value, "reason": item.reason,
@@ -206,5 +210,6 @@ def campaign_from_dict(value: dict[str, Any]) -> ValidationCampaign:
         last_validation_status=None if last_status is None else ValidationStatus(last_status), last_reason=value.get("last_reason"),
         retry_count=value.get("retry_count", 0), next_retry_at=timestamp("next_retry_at"),
         poll_interval_seconds=value.get("poll_interval_seconds", 30.0), cancel_requested=value.get("cancel_requested", False),
-        supervisor_claim_token=value.get("supervisor_claim_token"), history=history, wait_periods=wait_periods,
+        allow_model_download=value.get("allow_model_download", False), supervisor_claim_token=value.get("supervisor_claim_token"),
+        history=history, wait_periods=wait_periods,
     )

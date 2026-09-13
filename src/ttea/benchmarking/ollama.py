@@ -172,8 +172,40 @@ class OllamaClient:
     def installed_models(self) -> tuple[str, ...]:
         return self._model_names(self._request("GET", "/api/tags"), "models")
 
+    def installed_model_records(self) -> tuple[dict[str, Any], ...]:
+        models = self._request("GET", "/api/tags").get("models")
+        if not isinstance(models, list):
+            raise OllamaRuntimeError("Ollama model-list response is invalid")
+        records = []
+        for item in models:
+            if not isinstance(item, dict):
+                raise OllamaRuntimeError("Ollama model-list entry is invalid")
+            name = item.get("name") or item.get("model")
+            if not isinstance(name, str) or not name.strip():
+                raise OllamaRuntimeError("Ollama model-list entry has no valid name")
+            records.append(dict(item))
+        return tuple(records)
+
     def running_models(self) -> tuple[str, ...]:
         return self._model_names(self._request("GET", "/api/ps"), "models")
+
+    def pull(self, model: str, timeout_seconds: float) -> dict[str, Any]:
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("model must be a non-empty string")
+        _positive_timeout(timeout_seconds, "timeout_seconds")
+        payload = self._request("POST", "/api/pull", {"model": model, "stream": False}, timeout_seconds)
+        status = payload.get("status")
+        if not isinstance(status, str) or not status.strip() or payload.get("error") is not None:
+            raise OllamaRuntimeError("Ollama pull response is malformed or reports failure")
+        return payload
+
+    def show_model(self, model: str, timeout_seconds: float | None = None) -> dict[str, Any]:
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("model must be a non-empty string")
+        payload = self._request("POST", "/api/show", {"model": model}, timeout_seconds)
+        if not payload or not any(key in payload for key in ("details", "model_info", "capabilities", "license", "template")):
+            raise OllamaRuntimeError("Ollama show response is malformed")
+        return payload
 
     def generate(self, model: str, prompt: str, *, num_ctx: int | None = None,
                  num_predict: int | None = None, num_thread: int | None = None) -> OllamaGenerationResult:
@@ -396,6 +428,10 @@ class OllamaCleanup:
     def mark_model_cleanup_required(self) -> None:
         """Arm model cleanup once a generation worker has actually started."""
         self._model_cleanup_required = True
+
+    @property
+    def model_unload_confirmed(self) -> bool:
+        return self._api_unloaded
 
     def api_unload(self) -> None:
         if not self._model_cleanup_required:

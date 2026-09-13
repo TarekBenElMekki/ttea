@@ -30,6 +30,7 @@ def main() -> None:
     start_parser = campaign_commands.add_parser("start", help="start a validation campaign")
     start_parser.add_argument("--through", required=True)
     start_parser.add_argument("--detach", action="store_true")
+    start_parser.add_argument("--allow-model-download", action="store_true")
     start_parser.add_argument("--poll-interval", type=float, default=30.0, metavar="SECONDS")
     start_parser.add_argument("--max-duration", type=float, default=6 * 60 * 60, metavar="SECONDS")
     status_parser = campaign_commands.add_parser("status", help="show the current campaign")
@@ -46,7 +47,8 @@ def main() -> None:
         manager = CampaignManager(registry=registry, report_root=REPORT_ROOT)
         try:
             if arguments.campaign_command == "start":
-                campaign = manager.start(arguments.through, arguments.poll_interval, arguments.max_duration, arguments.detach)
+                campaign = manager.start(arguments.through, arguments.poll_interval, arguments.max_duration,
+                                         arguments.detach, arguments.allow_model_download)
                 alive = manager.store.process_matches(campaign.supervisor_pid, campaign.supervisor_started_epoch)
                 print(campaign_status_text(campaign, alive), end="")
                 return

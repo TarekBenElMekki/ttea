@@ -26,7 +26,7 @@ from .campaign_models import (ACTIVE_CAMPAIGN_STATES, CampaignRunRecord, Campaig
                               ValidationCampaign, campaign_from_dict, campaign_to_dict)
 from .models import ValidationRunResult, ValidationStatus
 from .reporting import result_to_dict
-from .runner import SuiteRegistry, ValidationRunner
+from .runner import SuiteRegistry, ValidationRunner, ValidationRunOptions
 from .suites import MIB, build_registry, stop_verified_process
 
 
@@ -345,7 +345,10 @@ class CampaignSupervisor:
                                                   heartbeat_at=current, next_retry_at=None, wait_periods=waits))
                 campaign = self._save(replace(campaign, state=CampaignState.RUNNING, updated_at=self.now(),
                                               heartbeat_at=self.now(), next_retry_at=None))
-                result = self.runner.run(campaign.current_suite)
+                pre_model_passed = any(item.suite == "pre_model" and item.status is ValidationStatus.PASS
+                                       for item in campaign.history)
+                options = ValidationRunOptions(campaign.allow_model_download, pre_model_passed)
+                result = self.runner.run(campaign.current_suite, options=options)
                 campaign = self.record_result(campaign, result)
                 if campaign.state in ACTIVE_CAMPAIGN_STATES:
                     continue
@@ -410,9 +413,12 @@ class CampaignManager:
             raise
 
     def start(self, target: str, poll_interval_seconds: float = 30.0,
-              max_duration_seconds: float = 6 * 60 * 60, detach: bool = True) -> ValidationCampaign:
+              max_duration_seconds: float = 6 * 60 * 60, detach: bool = True,
+              allow_model_download: bool = False) -> ValidationCampaign:
         _validate_duration(poll_interval_seconds, "poll_interval_seconds")
         _validate_duration(max_duration_seconds, "max_duration_seconds")
+        if not isinstance(allow_model_download, bool):
+            raise ValueError("allow_model_download must be a bool")
         suites = requested_suites(self.registry, target)
         now = utc_now()
         launcher = self.process_api(os.getpid())
@@ -422,6 +428,7 @@ class CampaignManager:
             created_at=now, updated_at=now, deadline_at=now + timedelta(seconds=max_duration_seconds),
             supervisor_pid=os.getpid(), supervisor_started_epoch=launcher.create_time(), heartbeat_at=now,
             last_reason="campaign configuration validated", poll_interval_seconds=poll_interval_seconds,
+            allow_model_download=allow_model_download,
         )
         self.store.create(campaign)
         if detach:
