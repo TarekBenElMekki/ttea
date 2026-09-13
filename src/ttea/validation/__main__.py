@@ -11,6 +11,7 @@ from .campaign_models import campaign_to_dict
 from .reporting import load_latest_report, result_to_dict, text_report
 from .runner import ValidationRunner, exit_code
 from .suites import build_registry
+from .watch import CampaignWatchRenderer, CampaignWatcher
 
 
 REPORT_ROOT = Path("data/validation")
@@ -38,6 +39,11 @@ def main() -> None:
     campaign_commands.add_parser("cancel", help="cancel the current campaign")
     campaign_commands.add_parser("resume", help="resume an interrupted or blocked campaign")
     campaign_commands.add_parser("list", help="list persisted campaigns")
+    watch_parser = campaign_commands.add_parser("watch", help="passively monitor the current or latest campaign")
+    watch_parser.add_argument("--refresh", type=float, default=2.0, metavar="SECONDS")
+    watch_parser.add_argument("--no-color", action="store_true")
+    watch_parser.add_argument("--once", action="store_true")
+    watch_parser.add_argument("--json", action="store_true", help="print one read-only machine-readable snapshot")
     supervise_parser = campaign_commands.add_parser("_supervise", help=argparse.SUPPRESS)
     supervise_parser.add_argument("--campaign-id", required=True)
     supervise_parser.add_argument("--claim-token", required=True)
@@ -70,6 +76,13 @@ def main() -> None:
             if arguments.campaign_command == "resume":
                 campaign = manager.resume()
                 print(campaign_status_text(campaign, True), end="")
+                return
+            if arguments.campaign_command == "watch":
+                if arguments.refresh < 0.5:
+                    parser.error("--refresh must be at least 0.5 seconds")
+                renderer = CampaignWatchRenderer(color=not arguments.no_color)
+                CampaignWatcher(renderer=renderer, refresh_seconds=arguments.refresh).run(
+                    once=arguments.once, json_output=arguments.json)
                 return
             for campaign in manager.store.list():
                 alive = manager.store.process_matches(campaign.supervisor_pid, campaign.supervisor_started_epoch)

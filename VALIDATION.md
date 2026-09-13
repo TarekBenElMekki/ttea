@@ -48,6 +48,19 @@ Benchmark execution still never pulls models. Acquisition exists only in the val
 .\.venv\Scripts\python.exe -m ttea.validation campaign start --through tiny_model --allow-model-download --detach
 ```
 
+## Campaign monitor
+
+Use the native read-only monitor to inspect the current or latest persisted validation campaign:
+
+```powershell
+.\.venv\Scripts\python.exe -m ttea.validation campaign watch
+.\.venv\Scripts\python.exe -m ttea.validation campaign watch --refresh 1
+.\.venv\Scripts\python.exe -m ttea.validation campaign watch --once
+.\.venv\Scripts\python.exe -m ttea.validation campaign watch --no-color
+```
+
+The watch command is read-only. Closing it does not stop the detached validation campaign.
+
 Without `--allow-model-download`, an already-installed exact model may be validated but a missing model blocks the suite. Download preflight separately checks disk and model-less server resources, allowing provisioning to finish even when the later 512 MiB inference estimate remains delayed. Completed provisioning is retained, so campaign retries inspect the local digest instead of downloading repeatedly.
 
 Inference follows `ResourceManager -> BenchmarkSupervisor -> OllamaBenchmarkWorker` with at most 512 context tokens, 16 generated tokens, two CPU threads, non-streaming output, and zero keep-alive. The forced-timeout scenario uses a much shorter outer model deadline without creating an unbounded request; if both bounded attempts finish too quickly, that scenario is reported as skipped rather than failed.
