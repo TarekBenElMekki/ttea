@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Any
 from ttea.capability.evaluator import CapabilityEvaluationResult
-from ttea.capability.evaluator import CapabilityVerdict, EvaluationState
+from ttea.capability.evaluator import CapabilityVerdict, EvaluationState, EvaluationStatus, FailureCode
 from ttea.capability.catalogue import CAPABILITY_FIXTURES
 from .manifest import TournamentManifest
 
@@ -115,6 +115,15 @@ class CapabilityWorkRecord:
 
 def _raw_to_dict(r):return {"work_id":r.work_id.to_dict(),"fixture_digest":r.fixture_digest,"technical_attempt_id":r.technical_attempt_id,"response_utf8":r.response_utf8,"response_sha256":r.response_sha256,"response_bytes":r.response_bytes}
 def _result_to_dict(r:CapabilityEvaluationResult):return {"fixture_id":r.fixture_id,"fixture_version":r.fixture_version,"fixture_digest":r.fixture_digest,"evaluator_version":r.evaluator_version,"failure_code_version":r.failure_code_version,"status":r.status.value,"verdict":r.verdict.value,"response_bytes":r.response_bytes,"parse_state":r.parse_state.value,"schema_state":r.schema_state.value,"hard_gate_results":{k:v.value for k,v in r.hard_gate_results.items()},"failure_codes":[x.value for x in r.failure_codes],"graded_measurements":dict(r.graded_measurements),"parsed_response":None if r.parsed_response is None else dict(r.parsed_response)}
+def _result_from_dict(x:dict[str,Any])->CapabilityEvaluationResult:
+    return CapabilityEvaluationResult(
+        x["fixture_id"],x["fixture_version"],x["fixture_digest"],x["evaluator_version"],
+        x["failure_code_version"],EvaluationStatus(x["status"]),CapabilityVerdict(x["verdict"]),
+        x["response_bytes"],EvaluationState(x["parse_state"]),EvaluationState(x["schema_state"]),
+        {k:EvaluationState(v) for k,v in x["hard_gate_results"].items()},
+        tuple(FailureCode(v) for v in x["failure_codes"]),
+        x["graded_measurements"],x.get("parsed_response"),
+    )
 
 class CapabilityWorkStore:
     def __init__(self,root:Path|str):self.root=Path(root)
@@ -176,6 +185,46 @@ class CapabilityWorkStore:
         payload={"work_id":w.to_dict(),"raw_response_digest":r.raw_response_digest,"result":_result_to_dict(result)};digest=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
         self._atomic(self._path(w,"evaluator-result.json"),payload,immutable=True)
         return self.save(replace(r,evaluator_result_digest=digest))
+    def evaluator_result(self,w):
+        r=self.load(w)
+        if not r.evaluator_result_digest:raise CapabilityStoreError("capability work has no evaluator result")
+        payload=json.loads(self._path(w,"evaluator-result.json").read_text(encoding="utf-8"))
+        if CapabilityWorkId(**payload["work_id"])!=w or payload.get("raw_response_digest")!=r.raw_response_digest:raise CapabilityStoreError("evaluator result path identity mismatch")
+        digest=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
+        if digest!=r.evaluator_result_digest:raise CapabilityStoreError("evaluator result digest mismatch")
+        result=_result_from_dict(payload["result"])
+        if result.fixture_digest!=r.fixture_digest or (result.fixture_id,result.fixture_version)!=(w.fixture_id,w.fixture_version):raise CapabilityStoreError("evaluator result binding mismatch")
+        return result
+    def publish_technical_evidence(self,w,attempt_id:str,evidence:dict[str,Any])->str:
+        r=self.load(w);_text(attempt_id,"attempt_id")
+        if r.active_attempt_id!=attempt_id:raise CapabilityStoreError("technical evidence attempt identity mismatch")
+        payload={"work_id":w.to_dict(),"attempt_id":attempt_id,"evidence":evidence}
+        try:encoded=json.dumps(payload,sort_keys=True,separators=(",",":"),ensure_ascii=False,allow_nan=False).encode("utf-8")
+        except (TypeError,ValueError) as exc:raise CapabilityStoreError(f"technical evidence is not canonical JSON: {exc}") from exc
+        digest=hashlib.sha256(encoded).hexdigest()
+        self._atomic(self._path(w,f"technical-{digest}.json"),payload,immutable=True)
+        return digest
+    def finish_attempt(self,w,evidence_ref:str):
+        r=self.load(w);_text(evidence_ref,"evidence_ref")
+        if not r.active_attempt_id:raise CapabilityStoreError("no active technical attempt")
+        return self.save(replace(r,active_attempt_id=None,technical_evidence_refs=tuple((*r.technical_evidence_refs,evidence_ref))))
+    def mark_cleanup_complete(self,w,evidence_ref:str):
+        r=self.load(w);_text(evidence_ref,"evidence_ref")
+        if r.active_attempt_id:
+            return self.finish_attempt(w,evidence_ref)
+        if not r.raw_response_digest:
+            raise CapabilityStoreError("cleanup completion without active attempt requires a durable raw response")
+        if evidence_ref in r.technical_evidence_refs:
+            return r
+        return self.save(replace(r,technical_evidence_refs=tuple((*r.technical_evidence_refs,evidence_ref))))
+    def mark_terminal(self,w,status:str,reason:str|None=None):
+        r=self.load(w);_text(status,"terminal_status")
+        if reason is not None:_text(reason,"terminal_reason")
+        if r.active_attempt_id:raise CapabilityStoreError("cannot terminalize active capability work")
+        if r.terminal_status:
+            if (r.terminal_status,r.terminal_reason)!=(status,reason):raise CapabilityStoreError("terminal capability work is immutable")
+            return r
+        return self.save(replace(r,terminal_status=status,terminal_reason=reason))
     def recover(self,w):
         r=self.load(w)
         if r.active_attempt_id:return self.save(replace(r,active_attempt_id=None))
