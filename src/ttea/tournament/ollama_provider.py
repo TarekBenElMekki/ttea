@@ -295,10 +295,10 @@ class OllamaTournamentProvider(TournamentProvider):
             cpu_thread_limit=policy.cpu_threads,
         )
 
-    def execute_survival(self, candidate: TournamentCandidate,
+    def execute_prompt(self, candidate: TournamentCandidate,
                          request: TournamentExecutionRequest,
                          resource_request: ResourceRequest) -> SurvivalExecutionResult:
-        """Run one candidate only through BenchmarkSupervisor and its owned worker."""
+        """Run one exact manifest candidate through the supervised owned-runtime path."""
         self._require_candidate(candidate)
         if (request.candidate_id, request.model) != (candidate.candidate_id, candidate.variant.model):
             raise ProvisioningRejected("execution request does not match persisted manifest")
@@ -430,3 +430,9 @@ class OllamaTournamentProvider(TournamentProvider):
             None if owned_identity is None else owned_identity.pid,
             None if owned_identity is None else owned_identity.started_epoch,
         )
+
+    def execute_survival(self, candidate: TournamentCandidate,
+                         request: TournamentExecutionRequest,
+                         resource_request: ResourceRequest) -> SurvivalExecutionResult:
+        """Run one candidate only through BenchmarkSupervisor and its owned worker."""
+        return self.execute_prompt(candidate, request, resource_request)

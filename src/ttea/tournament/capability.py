@@ -8,8 +8,11 @@ from typing import Any
 from ttea.capability.evaluator import CapabilityEvaluationResult
 from ttea.capability.evaluator import CapabilityVerdict, EvaluationState
 from ttea.capability.catalogue import CAPABILITY_FIXTURES
+from .manifest import TournamentManifest
 
 ROUND2_CANDIDATES=("qwen35-08b","granite4-3b-h","granite33-2b","deepseek-r1-15b")
+ROUND2_SOURCE_SURVIVAL_TOURNAMENT_ID="tournament-20260913T233857.440551Z-ee1f8029"
+ROUND2_SOURCE_SURVIVAL_MANIFEST_DIGEST="01f7f7b6ebc909345ffaa1de515139a2fbf97abfe6d99554c85c47e4f517f7c5"
 PLANNING_FIXTURES=frozenset(("cap.plan.chain","cap.plan.fork_join"))
 REPLANNING_FIXTURES=frozenset(("cap.replan.failed_alternative","cap.replan.state_delta"))
 class CapabilityTerminalState(str):
@@ -44,6 +47,39 @@ def terminal_state(items,integrity_blocker:bool=False):
     return CapabilityTerminalState.COMPLETED_NO_ELIGIBLE_MODEL
 
 class CapabilityStoreError(RuntimeError): pass
+
+def round2_manifest_from_source(
+    source_manifest:TournamentManifest,
+    *,
+    expected_digest:str=ROUND2_SOURCE_SURVIVAL_MANIFEST_DIGEST,
+)->TournamentManifest:
+    if not isinstance(source_manifest,TournamentManifest):
+        raise CapabilityStoreError("source manifest must be a TournamentManifest")
+    source_manifest.verify_digest(expected_digest)
+    selected=[]
+    for candidate_id in ROUND2_CANDIDATES:
+        candidate=source_manifest.candidate(candidate_id)
+        if not candidate.enabled:
+            raise CapabilityStoreError(f"Round-2 survivor is disabled: {candidate_id}")
+        if candidate.validation_only:
+            raise CapabilityStoreError(f"Round-2 survivor is validation-only: {candidate_id}")
+        if candidate.variant.provider!="ollama":
+            raise CapabilityStoreError(f"Round-2 survivor is not an Ollama candidate: {candidate_id}")
+        selected.append(candidate)
+    if tuple(item.candidate_id for item in selected)!=ROUND2_CANDIDATES:
+        raise CapabilityStoreError("Round-2 survivor order mismatch")
+    return TournamentManifest(candidates=tuple(selected))
+
+def load_round2_manifest(
+    root:Path|str=Path("data/tournaments"),
+)->TournamentManifest:
+    source_path=Path(root)/ROUND2_SOURCE_SURVIVAL_TOURNAMENT_ID/"manifest.json"
+    try:
+        payload=json.loads(source_path.read_text(encoding="utf-8"))
+    except (OSError,json.JSONDecodeError) as exc:
+        raise CapabilityStoreError(f"cannot load authoritative Survival manifest: {exc}") from exc
+    source_manifest=TournamentManifest.from_dict(payload)
+    return round2_manifest_from_source(source_manifest)
 def _text(x:object,n:str)->None:
     if not isinstance(x,str) or not x.strip(): raise CapabilityStoreError(f"{n} must be non-empty")
 @dataclass(frozen=True)
