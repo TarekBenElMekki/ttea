@@ -17,6 +17,7 @@ from ttea.tournament.capability import (
     round2_manifest_from_source,
 )
 from ttea.tournament.catalog import build_survival_manifest
+from ttea.tournament.execution import SurvivalExecutionPolicy
 from ttea.tournament.manifest import ManifestMismatchError, TournamentManifest
 from ttea.tournament.models import CandidateVariant, TournamentCandidate
 from ttea.tournament.ollama_provider import (
@@ -181,6 +182,60 @@ class CapabilityProviderBridgeTests(unittest.TestCase):
             resources,
         )
 
+
+    def test_request_scoped_policy_preserves_survival_limits_exactly(self):
+        source = build_survival_manifest()
+        candidate = source.candidate(ROUND2_CANDIDATES[0])
+        provider = object.__new__(OllamaTournamentProvider)
+        provider.manifest = source
+        provider._allowed = {
+            item.candidate_id: item.variant.model
+            for item in source.candidates
+        }
+        provider.execution_policy = SurvivalExecutionPolicy()
+
+        survival_request = provider.build_execution_request(
+            candidate,
+            source.rounds[0],
+            source.tasks[0],
+            0,
+        )
+
+        self.assertEqual(
+            provider.benchmark_policy_for_request(survival_request),
+            provider.benchmark_policy(),
+        )
+
+    def test_request_scoped_policy_allows_bounded_capability_output(self):
+        source = build_survival_manifest()
+        candidate = source.candidate(ROUND2_CANDIDATES[0])
+        provider = object.__new__(OllamaTournamentProvider)
+        provider.execution_policy = SurvivalExecutionPolicy()
+
+        request = replace(
+            execution_request(candidate),
+            output_limit=512,
+        )
+        policy = provider.benchmark_policy_for_request(request)
+
+        self.assertEqual(policy.max_context_tokens, 4096)
+        self.assertEqual(policy.max_output_tokens, 512)
+        self.assertEqual(policy.model_timeout_seconds, 180)
+        self.assertEqual(policy.cpu_thread_limit, 4)
+
+    def test_request_scoped_policy_rejects_output_above_generic_bound(self):
+        source = build_survival_manifest()
+        candidate = source.candidate(ROUND2_CANDIDATES[0])
+        provider = object.__new__(OllamaTournamentProvider)
+        provider.execution_policy = SurvivalExecutionPolicy()
+
+        request = replace(
+            execution_request(candidate),
+            output_limit=513,
+        )
+
+        with self.assertRaisesRegex(ProvisioningRejected, "output safety bound"):
+            provider.benchmark_policy_for_request(request)
 
 if __name__ == "__main__":
     unittest.main()

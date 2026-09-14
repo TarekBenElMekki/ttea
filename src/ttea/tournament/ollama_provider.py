@@ -37,6 +37,7 @@ SURVIVAL_RAM_START_HEADROOM_BYTES = 512 * 1024 * 1024
 SURVIVAL_GPU_HEADROOM_BYTES = 256 * 1024 * 1024
 
 
+GENERIC_MAX_OUTPUT_TOKENS = 512
 def survival_resource_request(candidate: TournamentCandidate) -> ResourceRequest:
     """Build the canonical, provider-layer survival admission request."""
     if not isinstance(candidate, TournamentCandidate):
@@ -295,6 +296,36 @@ class OllamaTournamentProvider(TournamentProvider):
             cpu_thread_limit=policy.cpu_threads,
         )
 
+    def benchmark_policy_for_request(
+        self,
+        request: TournamentExecutionRequest,
+    ) -> BenchmarkSafetyPolicy:
+        """Derive bounded supervisor limits for one generic tournament request."""
+        if not isinstance(request, TournamentExecutionRequest):
+            raise ValueError("request must be a TournamentExecutionRequest")
+        base = self.execution_policy
+        if request.provider != "ollama":
+            raise ProvisioningRejected("execution request provider must be ollama")
+        if request.context_limit > base.context_limit:
+            raise ProvisioningRejected("execution request exceeds context safety bound")
+        if request.output_limit > GENERIC_MAX_OUTPUT_TOKENS:
+            raise ProvisioningRejected("execution request exceeds output safety bound")
+        if request.timeout_seconds > base.model_timeout_seconds:
+            raise ProvisioningRejected("execution request exceeds model timeout safety bound")
+        if request.cpu_threads > base.cpu_threads:
+            raise ProvisioningRejected("execution request exceeds CPU thread safety bound")
+        return BenchmarkSafetyPolicy(
+            telemetry_interval_seconds=1.0,
+            consecutive_resource_violation_samples=3,
+            request_timeout_seconds=base.request_timeout_seconds,
+            model_timeout_seconds=request.timeout_seconds,
+            cooldown_timeout_seconds=10.0,
+            gpu_warning_temperature_c=70.0,
+            gpu_abort_temperature_c=80.0,
+            max_context_tokens=request.context_limit,
+            max_output_tokens=request.output_limit,
+            cpu_thread_limit=request.cpu_threads,
+        )
     def execute_prompt(self, candidate: TournamentCandidate,
                          request: TournamentExecutionRequest,
                          resource_request: ResourceRequest) -> SurvivalExecutionResult:
@@ -303,7 +334,7 @@ class OllamaTournamentProvider(TournamentProvider):
         if (request.candidate_id, request.model) != (candidate.candidate_id, candidate.variant.model):
             raise ProvisioningRejected("execution request does not match persisted manifest")
         default_before = self.default_identity(DEFAULT_OLLAMA_PORT)
-        policy = self.benchmark_policy()
+        policy = self.benchmark_policy_for_request(request)
         state_store = BenchmarkStateStore(self.state_path)
         state_store.acquire()
         owned_identity = None
