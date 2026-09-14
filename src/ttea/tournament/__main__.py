@@ -16,6 +16,9 @@ from .supervisor import TournamentSupervisorManager, supervise_tournament
 from .survival import survival_report_text
 from .watch import watch
 from .checklist_watch import checklist
+from .capability_campaign import (
+    CapabilityCampaignManager, CapabilityCampaignStore, capability_report_text,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -27,7 +30,7 @@ def _parser() -> argparse.ArgumentParser:
         child = commands.add_parser(command)
         child.add_argument("tournament_id", nargs="?")
     start = commands.add_parser("start")
-    start.add_argument("--through", choices=("survival",))
+    start.add_argument("--through", choices=("survival", "capability"))
     start.add_argument("--allow-model-download", action="store_true")
     start.add_argument("--detach", action="store_true")
     resume = commands.add_parser("resume")
@@ -68,11 +71,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     store = TournamentStore(arguments.root)
     survival_store = SurvivalStore(arguments.root)
     manager = TournamentSupervisorManager(survival_store)
+    capability_store = CapabilityCampaignStore(arguments.root)
+    capability_manager = CapabilityCampaignManager(arguments.root)
     try:
         if arguments.command == "start":
             if arguments.through is None:
-                print("execution not enabled without explicit --through survival")
+                print("execution not enabled without explicit --through survival or capability")
                 return 2
+            if arguments.through == "capability":
+                if arguments.allow_model_download:
+                    print("Capability execution never authorizes model download; restore the exact survived models instead.")
+                    return 2
+                if arguments.detach:
+                    print("Capability detached supervision is not enabled yet; run the campaign in the foreground.")
+                    return 2
+                campaign = capability_manager.start()
+                completed, total, current = capability_store.progress(campaign.tournament_id)
+                print(
+                    f"Tournament: {campaign.tournament_id}\n"
+                    f"State: {campaign.state.value}\n"
+                    f"Phase: CAPABILITY_ROUND_2\n"
+                    f"Progress: {completed}/{total}\n"
+                    f"Current work: {current.key if current else '(none)'}\n"
+                    f"Last reason: {campaign.last_reason or '(none)'}"
+                )
+                return 0
             campaign = manager.start(arguments.through, arguments.allow_model_download, arguments.detach)
             alive = manager.process_matches(campaign.supervisor_pid, campaign.supervisor_started_epoch)
             print(_status_text(campaign, alive, arguments.allow_model_download), end="")
@@ -81,6 +104,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             supervise_tournament(arguments.tournament_id, arguments.claim_token, survival_store)
             return 0
         if arguments.command == "resume":
+            if (
+                arguments.tournament_id
+                and capability_store.campaign_path(arguments.tournament_id).is_file()
+            ):
+                campaign = capability_manager.resume(arguments.tournament_id)
+                completed, total, current = capability_store.progress(campaign.tournament_id)
+                print(
+                    f"Tournament: {campaign.tournament_id}\n"
+                    f"State: {campaign.state.value}\n"
+                    f"Phase: CAPABILITY_ROUND_2\n"
+                    f"Progress: {completed}/{total}\n"
+                    f"Current work: {current.key if current else '(none)'}\n"
+                    f"Last reason: {campaign.last_reason or '(none)'}"
+                )
+                return 0
             campaign = manager.resume(arguments.tournament_id)
             policy = survival_store.load_policy(campaign.tournament_id)
             print(_status_text(campaign, True, policy.allow_model_download), end="")
@@ -97,9 +135,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return checklist(arguments.root, refresh_seconds=arguments.refresh,
                              once=arguments.once)
         if arguments.command == "list":
+            capability_campaigns = capability_store.list()
             executions = survival_store.list()
-            if executions:
+            if capability_campaigns or executions:
                 print("ID\tSTATE\tUPDATED\tPROGRESS")
+                for item in capability_campaigns:
+                    completed, total, _current = capability_store.progress(item.tournament_id)
+                    print(f"{item.tournament_id}\t{item.state.value}\t{item.updated_at.isoformat()}\t{completed}/{total}")
                 for item in executions:
                     completed, total = item.progress
                     print(f"{item.tournament_id}\t{item.state.value}\t{item.updated_at.isoformat()}\t{completed}/{total}")
@@ -113,6 +155,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"{item.tournament_id}\t{item.state.value}\t{item.updated_at.isoformat()}\t{item.progress_completed}/{item.progress_total}")
             return 0
         if arguments.command == "status":
+            if (
+                arguments.tournament_id
+                and capability_store.campaign_path(arguments.tournament_id).is_file()
+            ):
+                capability, alive = capability_manager.status(arguments.tournament_id)
+                completed, total, current = capability_store.progress(capability.tournament_id)
+                print(
+                    f"Tournament: {capability.tournament_id}\n"
+                    f"State: {capability.state.value}\n"
+                    f"Phase: CAPABILITY_ROUND_2\n"
+                    f"Progress: {completed}/{total}\n"
+                    f"Owner: {'alive' if alive else 'not running'}\n"
+                    f"Current work: {current.key if current else '(none)'}\n"
+                    f"Last reason: {capability.last_reason or '(none)'}"
+                )
+                return 0
             candidate = (survival_store.load(arguments.tournament_id) if arguments.tournament_id
                          and survival_store.execution_path(arguments.tournament_id).is_file()
                          else survival_store.latest() if arguments.tournament_id is None else None)
@@ -121,6 +179,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 policy = survival_store.load_policy(candidate.tournament_id)
                 print(_status_text(candidate, alive, policy.allow_model_download), end="")
                 return 0
+        if (
+            arguments.command == "report"
+            and getattr(arguments, "tournament_id", None)
+            and capability_store.campaign_path(arguments.tournament_id).is_file()
+        ):
+            capability = capability_store.load(arguments.tournament_id)
+            print(capability_report_text(capability, capability_store), end="")
+            return 0
         tournament = _resolve(store, getattr(arguments, "tournament_id", None))
         if arguments.command == "manifest" and tournament is None:
             manifest = build_survival_manifest()
