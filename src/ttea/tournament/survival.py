@@ -8,13 +8,15 @@ import json
 import time
 from typing import Any, Callable
 
-from ttea.benchmarking import BenchmarkOutcome
+from ttea.benchmarking import BenchmarkOutcome, BenchmarkStateStore
 from ttea.resources import ResourceDecision, ResourceRequest
 
 from .execution import (
-    CandidateSurvivalRecord, ProvisioningState, SurvivalCampaign,
+    ActiveSurvivalAttempt, AttemptEvidenceState, CandidateSurvivalRecord,
+    ProvisioningState, ResourceAdmissionEvidence, SurvivalAttemptEvidence, SurvivalCampaign,
     SurvivalCampaignState, SurvivalExecutionPolicy, SurvivalOutcome,
-    SurvivalStore, TERMINAL_CANDIDATE_OUTCOMES, campaign_to_dict, utc_now,
+    SurvivalStore, TERMINAL_CANDIDATE_OUTCOMES, attempt_evidence_to_dict,
+    campaign_to_dict, survival_attempt_id, utc_now,
 )
 from .manifest import TournamentManifest
 from .models import EliminationReason
@@ -41,7 +43,13 @@ def _status_summary(campaign: SurvivalCampaign) -> dict[str, int]:
     }
 
 
-def survival_report_payload(campaign: SurvivalCampaign, manifest: TournamentManifest) -> dict[str, Any]:
+def survival_report_payload(
+    campaign: SurvivalCampaign,
+    manifest: TournamentManifest,
+    *,
+    attempts_by_candidate: dict[str, tuple[SurvivalAttemptEvidence, ...]] | None = None,
+    attempt_evidence_available: bool = False,
+) -> dict[str, Any]:
     rows = []
     for candidate in manifest.candidates:
         record = campaign.records[candidate.candidate_id]
@@ -71,6 +79,16 @@ def survival_report_payload(campaign: SurvivalCampaign, manifest: TournamentMani
     return {
         "tournament": campaign_to_dict(campaign), "summary": _status_summary(campaign),
         "candidates": rows,
+        "attempt_evidence": {
+            "available": attempt_evidence_available,
+            "by_candidate": {
+                candidate.candidate_id: [
+                    attempt_evidence_to_dict(item)
+                    for item in (attempts_by_candidate or {}).get(candidate.candidate_id, ())
+                ]
+                for candidate in manifest.candidates
+            },
+        },
     }
 
 
@@ -98,7 +116,16 @@ def write_survival_report(store: SurvivalStore, campaign: SurvivalCampaign,
                           manifest: TournamentManifest) -> tuple[Any, Any]:
     json_path = store.tournaments.report_json_path(campaign.tournament_id)
     text_path = store.tournaments.report_text_path(campaign.tournament_id)
-    TournamentStore._atomic_json(json_path, survival_report_payload(campaign, manifest))
+    attempts = dict(store.attempts_by_candidate(campaign.tournament_id))
+    TournamentStore._atomic_json(
+        json_path,
+        survival_report_payload(
+            campaign,
+            manifest,
+            attempts_by_candidate=attempts,
+            attempt_evidence_available=store.attempt_evidence_available(campaign.tournament_id),
+        ),
+    )
     TournamentStore._atomic_text(text_path, survival_report_text(campaign, manifest))
     return json_path, text_path
 
@@ -132,6 +159,16 @@ class SurvivalTournamentEngine:
 
     def _event(self, campaign: SurvivalCampaign, event: str, reason: str | None = None) -> None:
         self.store.append_event(campaign.tournament_id, event, self.now(), reason)
+
+    def _recover_active_attempt(self, campaign: SurvivalCampaign, reason: str) -> SurvivalCampaign:
+        state_path = getattr(self.provider, "state_path", None)
+        ownership = None if state_path is None else BenchmarkStateStore(state_path).snapshot()
+        return self.store.recover_active_attempt(
+            campaign,
+            finished_at=self.now(),
+            ownership_state=ownership,
+            reason=reason,
+        )
 
     def _record(self, campaign: SurvivalCampaign, record: CandidateSurvivalRecord, **changes: Any) -> SurvivalCampaign:
         records = dict(campaign.records)
@@ -398,9 +435,29 @@ class SurvivalTournamentEngine:
                         id=resource_request.id,
                     )
                     execution_request = self.provider.build_execution_request(candidate, tournament_round, task, 0)
+                    attempt_number = record.attempt_count + 1
+                    active_attempt = ActiveSurvivalAttempt(
+                        attempt_id=survival_attempt_id(
+                            campaign.tournament_id,
+                            candidate.candidate_id,
+                            attempt_number,
+                        ),
+                        tournament_id=campaign.tournament_id,
+                        candidate_id=candidate.candidate_id,
+                        attempt_number=attempt_number,
+                        round_id=tournament_round.round_id,
+                        task_id=task.task_id,
+                        started_at=self.now(),
+                        resource_request=resource_request,
+                        admission=ResourceAdmissionEvidence.capture(
+                            assessment,
+                            resource_request.id,
+                        ),
+                    )
                     running = replace(record, outcome=SurvivalOutcome.RUNNING,
-                                      attempt_count=record.attempt_count + 1, reason="survival execution started")
+                                      attempt_count=attempt_number, reason="survival execution started")
                     campaign = self._record(campaign, running, state=SurvivalCampaignState.RUNNING,
+                                            active_attempt=active_attempt,
                                             last_event="survival started", last_reason=running.reason)
                     self._event(campaign, "survival started", candidate.candidate_id)
                     if self.active_candidates != 0:
@@ -412,6 +469,13 @@ class SurvivalTournamentEngine:
                                 candidate, execution_request, resource_request
                             )
                         except ProvisioningRuntimeDelayed as exc:
+                            self.store.finalize_attempt(SurvivalAttemptEvidence(
+                                attempt=active_attempt,
+                                evidence_state=AttemptEvidenceState.INTERRUPTED,
+                                finished_at=self.now(),
+                                benchmark_outcome=None,
+                                benchmark_reasons=(f"transient owned-runtime startup failure: {exc}",),
+                            ))
                             retry_record = replace(
                                 running,
                                 outcome=SurvivalOutcome.INTERRUPTED,
@@ -421,6 +485,7 @@ class SurvivalTournamentEngine:
                                 campaign,
                                 retry_record,
                                 state=SurvivalCampaignState.RUNNING,
+                                active_attempt=None,
                                 last_event="runtime startup retry",
                                 last_reason=retry_record.reason,
                             )
@@ -446,6 +511,27 @@ class SurvivalTournamentEngine:
                         "resource_recovery_verified": executed.resource_recovery_verified,
                         "default_server_identity_preserved": executed.default_server_identity_preserved,
                     }
+                    response_valid = executed.metrics.get("response_is_string")
+                    if not isinstance(response_valid, bool):
+                        response_valid = None
+                    self.store.finalize_attempt(SurvivalAttemptEvidence(
+                        attempt=active_attempt,
+                        evidence_state=AttemptEvidenceState.FINALIZED,
+                        finished_at=max(active_attempt.started_at, benchmark.finished_at),
+                        benchmark_outcome=benchmark.outcome,
+                        benchmark_reasons=benchmark.reasons,
+                        benchmark_started_at=benchmark.started_at,
+                        benchmark_finished_at=benchmark.finished_at,
+                        worker_pid=benchmark.worker_pid,
+                        worker_started_epoch=benchmark.worker_started_epoch,
+                        owned_ollama_pid=executed.owned_ollama_pid,
+                        owned_ollama_started_epoch=executed.owned_ollama_started_epoch,
+                        response_valid=response_valid,
+                        metrics=executed.metrics,
+                        cleanup_verified=executed.cleanup_verified,
+                        resource_recovery_verified=executed.resource_recovery_verified,
+                        default_server_identity_preserved=executed.default_server_identity_preserved,
+                    ))
                     if not executed.cleanup_verified:
                         reason = "CLEANUP_FAILED: required model/server/runtime cleanup was not verified"
                         completed = replace(running, outcome=SurvivalOutcome.ELIMINATED, reason=reason, **common)
@@ -470,6 +556,7 @@ class SurvivalTournamentEngine:
                                     **common,
                                 ),
                                 state=SurvivalCampaignState.RUNNING,
+                                active_attempt=None,
                                 last_event="runtime resource pressure",
                                 last_reason=benchmark_reason,
                             )
@@ -495,6 +582,7 @@ class SurvivalTournamentEngine:
                         campaign = self._record(campaign, replace(running, outcome=SurvivalOutcome.INTERRUPTED,
                                                                   reason="; ".join(benchmark.reasons), **common),
                                                 state=SurvivalCampaignState.RUNNING,
+                                                active_attempt=None,
                                                 last_event="runtime attempt failed", last_reason="; ".join(benchmark.reasons))
                         continue
                     else:
@@ -503,6 +591,7 @@ class SurvivalTournamentEngine:
                         completed = replace(running, outcome=SurvivalOutcome.ELIMINATED, reason=reason, **common)
                     event = "candidate passed" if completed.outcome is SurvivalOutcome.PASSED else "candidate eliminated"
                     campaign = self._record(campaign, completed, state=SurvivalCampaignState.RUNNING,
+                                            active_attempt=None,
                                             last_event=event, last_reason=completed.reason)
                     self._event(campaign, event, _event_reason(candidate.candidate_id, completed.reason))
                     self._event(campaign, "cleanup verified" if executed.cleanup_verified else "cleanup failed",
@@ -519,14 +608,22 @@ class SurvivalTournamentEngine:
             write_survival_report(self.store, completed, manifest)
             return completed
         except KeyboardInterrupt:
-            interrupted = replace(self.store.load(self.tournament_id), state=SurvivalCampaignState.INTERRUPTED,
+            latest = self._recover_active_attempt(
+                self.store.load(self.tournament_id),
+                "supervisor interrupted an admitted execution",
+            )
+            interrupted = replace(latest, state=SurvivalCampaignState.INTERRUPTED,
                                   updated_at=self.now(), heartbeat_at=self.now(), next_retry_at=None,
                                   last_event="tournament interrupted", last_reason="supervisor interrupted")
             interrupted = self._save(interrupted)
             write_survival_report(self.store, interrupted, manifest)
             return interrupted
         except BaseException as exc:
-            failed = replace(self.store.load(self.tournament_id), state=SurvivalCampaignState.FAILED,
+            latest = self._recover_active_attempt(
+                self.store.load(self.tournament_id),
+                f"supervisor failed during admitted execution: {type(exc).__name__}: {exc}",
+            )
+            failed = replace(latest, state=SurvivalCampaignState.FAILED,
                              updated_at=self.now(), heartbeat_at=self.now(), next_retry_at=None,
                              last_event="tournament failed", last_reason=f"{type(exc).__name__}: {exc}")
             self._save(failed)

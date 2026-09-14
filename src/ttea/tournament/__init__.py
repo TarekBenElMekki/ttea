@@ -9,11 +9,14 @@ from .catalog import (
     SURVIVAL_PROMPT, SURVIVAL_ROUND, SURVIVAL_TASK, build_survival_manifest,
 )
 from .execution import (
-    ACTIVE_SURVIVAL_STATES, CandidateSurvivalRecord, ProvisioningEvidence,
-    ProvisioningState, SurvivalCampaign, SurvivalCampaignState,
-    SurvivalExecutionPolicy, SurvivalOutcome, SurvivalStore,
+    ACTIVE_SURVIVAL_STATES, ActiveSurvivalAttempt, AttemptEvidenceState,
+    CandidateSurvivalRecord, ProvisioningEvidence, ProvisioningState,
+    ResourceAdmissionEvidence, SurvivalAttemptEvidence, SurvivalCampaign,
+    SurvivalCampaignState, SurvivalExecutionPolicy, SurvivalOutcome, SurvivalStore,
+    attempt_evidence_from_dict, attempt_evidence_to_dict,
     campaign_from_dict as survival_campaign_from_dict,
     campaign_to_dict as survival_campaign_to_dict,
+    survival_attempt_id,
 )
 from .models import (
     DIMENSIONS, MAX_CONCURRENCY, PERFORMANCE_METRICS, SCHEMA_VERSION, AttemptStatus, CandidateRoundResult,
@@ -57,17 +60,17 @@ from .store import (
 )
 
 __all__ = (
-    "ACTIVE_SURVIVAL_STATES", "AttemptConflictError", "AttemptStatus", "AttemptTransitionError", "CATALOG_BY_ID", "CATALOG_SOURCE", "CONTEXT_TARGET", "CandidateCatalogEntry", "CandidateRoundResult", "CandidateState", "CandidateSurvivalRecord", "CandidateTransitionError",
+    "ACTIVE_SURVIVAL_STATES", "ActiveSurvivalAttempt", "AttemptConflictError", "AttemptEvidenceState", "AttemptStatus", "AttemptTransitionError", "CATALOG_BY_ID", "CATALOG_SOURCE", "CONTEXT_TARGET", "CandidateCatalogEntry", "CandidateRoundResult", "CandidateState", "CandidateSurvivalRecord", "CandidateTransitionError",
     "CandidateVariant", "DIMENSIONS", "EliminationReason", "EliminationRecord", "EvidenceConflictError", "INITIAL_CATALOG", "MAX_CONCURRENCY", "PERFORMANCE_METRICS", "ProvisionalResourceEstimate",
     "ManifestError", "ManifestMismatchError", "PersistedTournament", "ProviderAvailability",
-    "OllamaTournamentProvider", "ProviderMetadata", "ProvisioningDeferred", "ProvisioningEligibility", "ProvisioningEvidence", "ProvisioningRejected", "ProvisioningResourceDelayed", "ProvisioningRuntimeDelayed", "ProvisioningResourceDenied", "ProvisioningState", "REAL_CANDIDATES", "REAL_CATALOG", "RESEARCH_DATE", "ResearchTier", "ResultConflictError", "SAFETY_CATALOG_ENTRY", "SCHEMA_VERSION", "SURVIVAL_PROMPT", "SURVIVAL_ROUND", "SURVIVAL_TASK",
+    "OllamaTournamentProvider", "ProviderMetadata", "ProvisioningDeferred", "ProvisioningEligibility", "ProvisioningEvidence", "ProvisioningRejected", "ProvisioningResourceDelayed", "ProvisioningRuntimeDelayed", "ProvisioningResourceDenied", "ProvisioningState", "REAL_CANDIDATES", "REAL_CATALOG", "RESEARCH_DATE", "ResourceAdmissionEvidence", "ResearchTier", "ResultConflictError", "SAFETY_CATALOG_ENTRY", "SCHEMA_VERSION", "SURVIVAL_PROMPT", "SURVIVAL_ROUND", "SURVIVAL_TASK",
     "SchedulerDecision", "SelectionPolicy", "SelectionRole", "TaskResult", "TimestampRegressionError", "TournamentAttempt",
     "TournamentCandidate", "TournamentExecutionDisabled", "TournamentExecutionRequest",
     "TournamentIntegrityError", "TournamentManifest", "TournamentPhase", "TournamentProvider", "TournamentResult",
-    "SurvivalCampaign", "SurvivalCampaignState", "SurvivalExecutionPolicy", "SurvivalExecutionResult", "SurvivalOutcome", "SurvivalStore", "SurvivalTournamentEngine", "survival_resource_request", "TournamentRound", "TournamentSelection", "TournamentSerializationError", "TournamentSnapshot", "TournamentSupervisorManager",
+    "SurvivalAttemptEvidence", "SurvivalCampaign", "SurvivalCampaignState", "SurvivalExecutionPolicy", "SurvivalExecutionResult", "SurvivalOutcome", "SurvivalStore", "SurvivalTournamentEngine", "survival_attempt_id", "survival_resource_request", "TournamentRound", "TournamentSelection", "TournamentSerializationError", "TournamentSnapshot", "TournamentSupervisorManager",
     "TournamentState", "TournamentStore", "TournamentStoreError", "TournamentTask",
     "TIER_MEMBERSHIP", "TIER_RESOURCE_ESTIMATES", "TournamentTransitionError", "TournamentWorkItem", "WorkDisposition", "aggregate_round", "apply_scheduler_decision", "attempt_id", "build_real_candidate_manifest", "build_survival_manifest", "calculate_progress",
-    "composite", "eliminate_candidate", "execute", "next_work", "ordered_work",
+    "attempt_evidence_from_dict", "attempt_evidence_to_dict", "composite", "eliminate_candidate", "execute", "next_work", "ordered_work",
     "recover_stale_attempts", "require_attempt_transition", "require_candidate_transition", "require_transition", "retry_attempt",
     "resume_interrupted", "schedule_resource_decision", "select", "snapshot", "task_result_id",
     "supervise_tournament", "survival_campaign_from_dict", "survival_campaign_to_dict", "survival_report_payload", "survival_report_text", "tournament_from_dict", "tournament_to_dict", "valid_attempt_transition", "valid_transition", "write_survival_report",

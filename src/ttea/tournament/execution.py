@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
+import hashlib
 import json
 import math
 import os
@@ -12,6 +13,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 from uuid import uuid4
+
+from ttea.benchmarking.models import BenchmarkOutcome
+from ttea.resources import ResourceDecision, ResourceRequest
 
 from .manifest import TournamentManifest
 from .models import CandidateState, PersistedTournament, SCHEMA_VERSION, TournamentState, freeze_json, thaw_json
@@ -109,6 +113,11 @@ class SurvivalOutcome(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class AttemptEvidenceState(str, Enum):
+    FINALIZED = "FINALIZED"
+    INTERRUPTED = "INTERRUPTED"
+
+
 TERMINAL_CANDIDATE_OUTCOMES = frozenset((
     SurvivalOutcome.PASSED, SurvivalOutcome.ELIMINATED,
     SurvivalOutcome.BLOCKED, SurvivalOutcome.CANCELLED,
@@ -177,6 +186,186 @@ class ProvisioningEvidence:
             raise ValueError("an already-installed model cannot also be downloaded")
 
 
+def survival_attempt_id(tournament_id: str, candidate_id: str, attempt_number: int) -> str:
+    """Return the stable identity for one admitted survival execution."""
+    _text(tournament_id, "tournament_id")
+    _text(candidate_id, "candidate_id")
+    if not isinstance(attempt_number, int) or isinstance(attempt_number, bool) or attempt_number <= 0:
+        raise ValueError("attempt_number must be a positive integer")
+    return (
+        f"{len(tournament_id)}:{tournament_id}|"
+        f"{len(candidate_id)}:{candidate_id}|attempt:{attempt_number}"
+    )
+
+
+@dataclass(frozen=True)
+class ResourceAdmissionEvidence:
+    request_id: str
+    decision: ResourceDecision
+    reasons: tuple[str, ...]
+    snapshot_timestamp: datetime | None = None
+    ram_required_bytes: int | None = None
+    ram_available_bytes: int | None = None
+    ram_reserved_bytes: int | None = None
+    ram_headroom_bytes: int | None = None
+    disk_required_bytes: int | None = None
+    disk_free_bytes: int | None = None
+    disk_reserved_bytes: int | None = None
+    disk_headroom_bytes: int | None = None
+    selected_gpu_index: int | None = None
+    gpu_total_vram_bytes: int | None = None
+    gpu_free_vram_bytes: int | None = None
+    gpu_reserved_vram_bytes: int | None = None
+    gpu_headroom_bytes: int | None = None
+    gpu_temperature_c: float | None = None
+
+    def __post_init__(self) -> None:
+        _text(self.request_id, "request_id")
+        if self.decision is not ResourceDecision.ALLOW:
+            raise ValueError("admitted attempt evidence requires an ALLOW decision")
+        if not isinstance(self.reasons, tuple) or not self.reasons or any(
+            not isinstance(reason, str) or not reason.strip() for reason in self.reasons
+        ):
+            raise ValueError("admission reasons must be a non-empty tuple of non-empty strings")
+        _utc(self.snapshot_timestamp, "snapshot_timestamp", optional=True)
+        for name in (
+            "ram_required_bytes", "ram_available_bytes", "ram_reserved_bytes",
+            "disk_required_bytes", "disk_free_bytes", "disk_reserved_bytes",
+            "selected_gpu_index", "gpu_total_vram_bytes", "gpu_free_vram_bytes",
+            "gpu_reserved_vram_bytes",
+        ):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+            ):
+                raise ValueError(f"{name} must be a non-negative integer when present")
+        for name in ("ram_headroom_bytes", "disk_headroom_bytes", "gpu_headroom_bytes"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
+                raise ValueError(f"{name} must be an integer when present")
+        if self.gpu_temperature_c is not None and (
+            not isinstance(self.gpu_temperature_c, (int, float))
+            or isinstance(self.gpu_temperature_c, bool)
+            or not math.isfinite(self.gpu_temperature_c)
+        ):
+            raise ValueError("gpu_temperature_c must be finite when present")
+
+    @classmethod
+    def capture(cls, assessment: object, request_id: str) -> "ResourceAdmissionEvidence":
+        return cls(
+            request_id=request_id,
+            decision=getattr(assessment, "decision"),
+            reasons=tuple(getattr(assessment, "reasons")),
+            snapshot_timestamp=getattr(assessment, "snapshot_timestamp", None),
+            **{
+                name: getattr(assessment, name, None)
+                for name in (
+                    "ram_required_bytes", "ram_available_bytes", "ram_reserved_bytes",
+                    "ram_headroom_bytes", "disk_required_bytes", "disk_free_bytes",
+                    "disk_reserved_bytes", "disk_headroom_bytes", "selected_gpu_index",
+                    "gpu_total_vram_bytes", "gpu_free_vram_bytes",
+                    "gpu_reserved_vram_bytes", "gpu_headroom_bytes", "gpu_temperature_c",
+                )
+            },
+        )
+
+
+@dataclass(frozen=True)
+class ActiveSurvivalAttempt:
+    attempt_id: str
+    tournament_id: str
+    candidate_id: str
+    attempt_number: int
+    round_id: str
+    task_id: str
+    started_at: datetime
+    resource_request: ResourceRequest
+    admission: ResourceAdmissionEvidence
+
+    def __post_init__(self) -> None:
+        for name in ("attempt_id", "tournament_id", "candidate_id", "round_id", "task_id"):
+            _text(getattr(self, name), name)
+        if not isinstance(self.attempt_number, int) or isinstance(self.attempt_number, bool) or self.attempt_number <= 0:
+            raise ValueError("attempt_number must be a positive integer")
+        if self.attempt_id != survival_attempt_id(self.tournament_id, self.candidate_id, self.attempt_number):
+            raise ValueError("attempt_id does not match its tournament/candidate/number identity")
+        _utc(self.started_at, "started_at")
+        if not isinstance(self.resource_request, ResourceRequest):
+            raise ValueError("resource_request must be a ResourceRequest")
+        if not isinstance(self.admission, ResourceAdmissionEvidence):
+            raise ValueError("admission must be ResourceAdmissionEvidence")
+        if self.admission.request_id != self.resource_request.id:
+            raise ValueError("admission request identity mismatch")
+
+
+@dataclass(frozen=True)
+class SurvivalAttemptEvidence:
+    attempt: ActiveSurvivalAttempt
+    evidence_state: AttemptEvidenceState
+    finished_at: datetime
+    benchmark_outcome: BenchmarkOutcome | None
+    benchmark_reasons: tuple[str, ...]
+    benchmark_started_at: datetime | None = None
+    benchmark_finished_at: datetime | None = None
+    worker_pid: int | None = None
+    worker_started_epoch: float | None = None
+    owned_ollama_pid: int | None = None
+    owned_ollama_started_epoch: float | None = None
+    response_valid: bool | None = None
+    metrics: Mapping[str, Any] = field(default_factory=dict)
+    cleanup_verified: bool | None = None
+    resource_recovery_verified: bool | None = None
+    default_server_identity_preserved: bool | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.attempt, ActiveSurvivalAttempt):
+            raise ValueError("attempt must be ActiveSurvivalAttempt")
+        if not isinstance(self.evidence_state, AttemptEvidenceState):
+            raise ValueError("evidence_state must be AttemptEvidenceState")
+        _utc(self.finished_at, "finished_at")
+        if self.finished_at < self.attempt.started_at:
+            raise ValueError("finished_at must not precede attempt start")
+        if self.evidence_state is AttemptEvidenceState.FINALIZED and not isinstance(self.benchmark_outcome, BenchmarkOutcome):
+            raise ValueError("finalized evidence requires a benchmark outcome")
+        if self.benchmark_outcome is not None and not isinstance(self.benchmark_outcome, BenchmarkOutcome):
+            raise ValueError("benchmark_outcome must be BenchmarkOutcome when present")
+        if not isinstance(self.benchmark_reasons, tuple) or not self.benchmark_reasons or any(
+            not isinstance(reason, str) or not reason.strip() for reason in self.benchmark_reasons
+        ):
+            raise ValueError("benchmark_reasons must be a non-empty tuple of non-empty strings")
+        _utc(self.benchmark_started_at, "benchmark_started_at", optional=True)
+        _utc(self.benchmark_finished_at, "benchmark_finished_at", optional=True)
+        if (
+            self.benchmark_started_at is not None
+            and self.benchmark_finished_at is not None
+            and self.benchmark_finished_at < self.benchmark_started_at
+        ):
+            raise ValueError("benchmark timestamps are inconsistent")
+        for prefix in ("worker", "owned_ollama"):
+            pid = getattr(self, f"{prefix}_pid")
+            started = getattr(self, f"{prefix}_started_epoch")
+            if pid is not None and (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0):
+                raise ValueError(f"{prefix}_pid must be positive when present")
+            if started is not None:
+                if pid is None:
+                    raise ValueError(f"{prefix}_started_epoch requires its PID")
+                _positive(started, f"{prefix}_started_epoch")
+        for name in (
+            "response_valid", "cleanup_verified", "resource_recovery_verified",
+            "default_server_identity_preserved",
+        ):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, bool):
+                raise ValueError(f"{name} must be bool when present")
+        object.__setattr__(self, "metrics", MappingProxyType({
+            key: freeze_json(value) for key, value in dict(self.metrics).items()
+        }))
+
+    @property
+    def attempt_id(self) -> str:
+        return self.attempt.attempt_id
+
+
 @dataclass(frozen=True)
 class CandidateSurvivalRecord:
     candidate_id: str
@@ -241,6 +430,7 @@ class SurvivalCampaign:
     next_retry_at: datetime | None = None
     last_event: str | None = None
     last_reason: str | None = None
+    active_attempt: ActiveSurvivalAttempt | None = None
 
     def __post_init__(self) -> None:
         _text(self.tournament_id, "tournament_id")
@@ -254,6 +444,19 @@ class SurvivalCampaign:
         copied = dict(self.records)
         if any(key != value.candidate_id or not isinstance(value, CandidateSurvivalRecord) for key, value in copied.items()):
             raise ValueError("records contain invalid candidate identities")
+        if self.active_attempt is not None:
+            if not isinstance(self.active_attempt, ActiveSurvivalAttempt):
+                raise ValueError("active_attempt must be ActiveSurvivalAttempt")
+            if (
+                self.active_attempt.tournament_id != self.tournament_id
+                or self.active_attempt.candidate_id not in copied
+                or self.active_attempt.attempt_number
+                != copied[self.active_attempt.candidate_id].attempt_count
+                or copied[self.active_attempt.candidate_id].outcome is not SurvivalOutcome.RUNNING
+                or self.current_candidate_id != self.active_attempt.candidate_id
+                or self.current_round_id != self.active_attempt.round_id
+            ):
+                raise ValueError("active attempt does not match campaign identity or attempt count")
         for name in ("current_candidate_id", "current_round_id", "supervisor_claim_token", "last_event", "last_reason"):
             _text(getattr(self, name), name, optional=True)
         if not isinstance(self.cancellation_requested, bool):
@@ -284,12 +487,150 @@ def _provisioning_to_dict(item: ProvisioningEvidence) -> dict[str, Any]:
     }
 
 
+def _request_to_dict(item: ResourceRequest) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "workload_type": item.workload_type,
+        "estimated_ram_bytes": item.estimated_ram_bytes,
+        "estimated_disk_bytes": item.estimated_disk_bytes,
+        "estimated_gpu_vram_bytes": item.estimated_gpu_vram_bytes,
+        "gpu_index": item.gpu_index,
+    }
+
+
+def _request_from_dict(value: Mapping[str, Any]) -> ResourceRequest:
+    return ResourceRequest(
+        id=value["id"],
+        workload_type=value["workload_type"],
+        estimated_ram_bytes=value["estimated_ram_bytes"],
+        estimated_disk_bytes=value["estimated_disk_bytes"],
+        estimated_gpu_vram_bytes=value.get("estimated_gpu_vram_bytes", 0),
+        gpu_index=value.get("gpu_index"),
+    )
+
+
+def _admission_to_dict(item: ResourceAdmissionEvidence) -> dict[str, Any]:
+    return {
+        "request_id": item.request_id,
+        "decision": item.decision.value,
+        "reasons": list(item.reasons),
+        "snapshot_timestamp": None if item.snapshot_timestamp is None else item.snapshot_timestamp.isoformat(),
+        **{
+            name: getattr(item, name)
+            for name in (
+                "ram_required_bytes", "ram_available_bytes", "ram_reserved_bytes",
+                "ram_headroom_bytes", "disk_required_bytes", "disk_free_bytes",
+                "disk_reserved_bytes", "disk_headroom_bytes", "selected_gpu_index",
+                "gpu_total_vram_bytes", "gpu_free_vram_bytes",
+                "gpu_reserved_vram_bytes", "gpu_headroom_bytes", "gpu_temperature_c",
+            )
+        },
+    }
+
+
+def _admission_from_dict(value: Mapping[str, Any]) -> ResourceAdmissionEvidence:
+    stamp = value.get("snapshot_timestamp")
+    return ResourceAdmissionEvidence(
+        request_id=value["request_id"],
+        decision=ResourceDecision(value["decision"]),
+        reasons=tuple(value["reasons"]),
+        snapshot_timestamp=None if stamp is None else datetime.fromisoformat(stamp),
+        **{
+            name: value.get(name)
+            for name in (
+                "ram_required_bytes", "ram_available_bytes", "ram_reserved_bytes",
+                "ram_headroom_bytes", "disk_required_bytes", "disk_free_bytes",
+                "disk_reserved_bytes", "disk_headroom_bytes", "selected_gpu_index",
+                "gpu_total_vram_bytes", "gpu_free_vram_bytes",
+                "gpu_reserved_vram_bytes", "gpu_headroom_bytes", "gpu_temperature_c",
+            )
+        },
+    )
+
+
+def _active_attempt_to_dict(item: ActiveSurvivalAttempt) -> dict[str, Any]:
+    return {
+        "attempt_id": item.attempt_id,
+        "tournament_id": item.tournament_id,
+        "candidate_id": item.candidate_id,
+        "attempt_number": item.attempt_number,
+        "round_id": item.round_id,
+        "task_id": item.task_id,
+        "started_at": item.started_at.isoformat(),
+        "resource_request": _request_to_dict(item.resource_request),
+        "admission": _admission_to_dict(item.admission),
+    }
+
+
+def _active_attempt_from_dict(value: Mapping[str, Any]) -> ActiveSurvivalAttempt:
+    return ActiveSurvivalAttempt(
+        attempt_id=value["attempt_id"],
+        tournament_id=value["tournament_id"],
+        candidate_id=value["candidate_id"],
+        attempt_number=value["attempt_number"],
+        round_id=value["round_id"],
+        task_id=value["task_id"],
+        started_at=datetime.fromisoformat(value["started_at"]),
+        resource_request=_request_from_dict(value["resource_request"]),
+        admission=_admission_from_dict(value["admission"]),
+    )
+
+
+def attempt_evidence_to_dict(item: SurvivalAttemptEvidence) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "attempt": _active_attempt_to_dict(item.attempt),
+        "evidence_state": item.evidence_state.value,
+        "finished_at": item.finished_at.isoformat(),
+        "benchmark_outcome": None if item.benchmark_outcome is None else item.benchmark_outcome.value,
+        "benchmark_reasons": list(item.benchmark_reasons),
+        "benchmark_started_at": None if item.benchmark_started_at is None else item.benchmark_started_at.isoformat(),
+        "benchmark_finished_at": None if item.benchmark_finished_at is None else item.benchmark_finished_at.isoformat(),
+        "worker_pid": item.worker_pid,
+        "worker_started_epoch": item.worker_started_epoch,
+        "owned_ollama_pid": item.owned_ollama_pid,
+        "owned_ollama_started_epoch": item.owned_ollama_started_epoch,
+        "response_valid": item.response_valid,
+        "metrics": thaw_json(item.metrics),
+        "cleanup_verified": item.cleanup_verified,
+        "resource_recovery_verified": item.resource_recovery_verified,
+        "default_server_identity_preserved": item.default_server_identity_preserved,
+    }
+
+
+def attempt_evidence_from_dict(value: Mapping[str, Any]) -> SurvivalAttemptEvidence:
+    if value.get("schema_version") != 1:
+        raise ValueError(f"unsupported attempt evidence schema: {value.get('schema_version')!r}")
+    outcome = value.get("benchmark_outcome")
+    benchmark_started = value.get("benchmark_started_at")
+    benchmark_finished = value.get("benchmark_finished_at")
+    return SurvivalAttemptEvidence(
+        attempt=_active_attempt_from_dict(value["attempt"]),
+        evidence_state=AttemptEvidenceState(value["evidence_state"]),
+        finished_at=datetime.fromisoformat(value["finished_at"]),
+        benchmark_outcome=None if outcome is None else BenchmarkOutcome(outcome),
+        benchmark_reasons=tuple(value["benchmark_reasons"]),
+        benchmark_started_at=None if benchmark_started is None else datetime.fromisoformat(benchmark_started),
+        benchmark_finished_at=None if benchmark_finished is None else datetime.fromisoformat(benchmark_finished),
+        worker_pid=value.get("worker_pid"),
+        worker_started_epoch=value.get("worker_started_epoch"),
+        owned_ollama_pid=value.get("owned_ollama_pid"),
+        owned_ollama_started_epoch=value.get("owned_ollama_started_epoch"),
+        response_valid=value.get("response_valid"),
+        metrics=value.get("metrics", {}),
+        cleanup_verified=value.get("cleanup_verified"),
+        resource_recovery_verified=value.get("resource_recovery_verified"),
+        default_server_identity_preserved=value.get("default_server_identity_preserved"),
+    )
+
+
 def campaign_to_dict(item: SurvivalCampaign) -> dict[str, Any]:
     return {
         "tournament_id": item.tournament_id, "manifest_digest": item.manifest_digest,
         "state": item.state.value, "created_at": item.created_at.isoformat(),
         "updated_at": item.updated_at.isoformat(), "deadline_at": item.deadline_at.isoformat(),
         "current_candidate_id": item.current_candidate_id, "current_round_id": item.current_round_id,
+        "active_attempt": None if item.active_attempt is None else _active_attempt_to_dict(item.active_attempt),
         "cancellation_requested": item.cancellation_requested, "supervisor_pid": item.supervisor_pid,
         "supervisor_started_epoch": item.supervisor_started_epoch,
         "supervisor_claim_token": item.supervisor_claim_token,
@@ -334,11 +675,14 @@ def campaign_from_dict(value: Mapping[str, Any]) -> SurvivalCampaign:
                 resource_recovery_verified=raw.get("resource_recovery_verified"),
                 default_server_identity_preserved=raw.get("default_server_identity_preserved"),
             )
+        active_raw = value.get("active_attempt")
         return SurvivalCampaign(
             tournament_id=value["tournament_id"], manifest_digest=value["manifest_digest"],
             state=SurvivalCampaignState(value["state"]), created_at=datetime.fromisoformat(value["created_at"]),
             updated_at=datetime.fromisoformat(value["updated_at"]), deadline_at=datetime.fromisoformat(value["deadline_at"]),
-            records=records, current_candidate_id=value.get("current_candidate_id"),
+            records=records,
+            active_attempt=None if active_raw is None else _active_attempt_from_dict(active_raw),
+            current_candidate_id=value.get("current_candidate_id"),
             current_round_id=value.get("current_round_id"), cancellation_requested=value.get("cancellation_requested", False),
             supervisor_pid=value.get("supervisor_pid"), supervisor_started_epoch=value.get("supervisor_started_epoch"),
             supervisor_claim_token=value.get("supervisor_claim_token"),
@@ -355,7 +699,11 @@ def policy_to_dict(item: SurvivalExecutionPolicy) -> dict[str, Any]:
 
 
 class SurvivalStore:
-    """Atomic survival state layered on immutable TournamentStore manifests."""
+    """Atomic survival state layered on immutable TournamentStore manifests.
+
+    ``execution.json`` is authoritative for survival progress; the generic
+    ``tournament.json`` remains the immutable base-manifest record.
+    """
 
     def __init__(self, root: Path | str = Path("data/tournaments")) -> None:
         self.root = Path(root)
@@ -370,6 +718,157 @@ class SurvivalStore:
     def supervisor_log_path(self, tournament_id: str) -> Path:
         return self.tournaments.tournament_path(tournament_id) / "supervisor.log"
 
+    def attempts_path(self, tournament_id: str) -> Path:
+        return self.tournaments.tournament_path(tournament_id) / "attempts"
+
+    def _attempt_candidate_path(self, tournament_id: str, candidate_id: str) -> Path:
+        if not isinstance(candidate_id, str) or not candidate_id.strip():
+            raise TournamentStoreError("attempt candidate identity must be non-empty")
+        candidate_key = hashlib.sha256(candidate_id.encode("utf-8")).hexdigest()
+        return self.attempts_path(tournament_id) / candidate_key
+
+    def attempt_path(self, tournament_id: str, candidate_id: str, attempt_number: int) -> Path:
+        if not isinstance(attempt_number, int) or isinstance(attempt_number, bool) or attempt_number <= 0:
+            raise TournamentStoreError("attempt number must be positive")
+        return self._attempt_candidate_path(tournament_id, candidate_id) / f"{attempt_number:06d}.json"
+
+    def attempt_evidence_available(self, tournament_id: str) -> bool:
+        """Distinguish new campaigns from historical campaigns without attempt evidence."""
+        return self.attempts_path(tournament_id).is_dir()
+
+    def attempts_for(self, tournament_id: str, candidate_id: str) -> tuple[SurvivalAttemptEvidence, ...]:
+        """Return immutable admitted-attempt evidence in attempt-number order."""
+        campaign = self.load(tournament_id)
+        if candidate_id not in campaign.records:
+            raise TournamentStoreError("attempt candidate is not in the persisted campaign")
+        directory = self._attempt_candidate_path(tournament_id, candidate_id)
+        if not directory.is_dir():
+            return ()
+        attempts = []
+        for path in sorted(directory.glob("*.json")):
+            try:
+                evidence = attempt_evidence_from_dict(
+                    TournamentStore._read_json(path, "survival attempt evidence")
+                )
+            except (TypeError, ValueError) as exc:
+                raise TournamentStoreError(f"invalid survival attempt evidence: {exc}") from exc
+            if (
+                evidence.attempt.tournament_id != tournament_id
+                or evidence.attempt.candidate_id != candidate_id
+                or path != self.attempt_path(tournament_id, candidate_id, evidence.attempt.attempt_number)
+            ):
+                raise TournamentStoreError("attempt evidence path identity mismatch")
+            attempts.append(evidence)
+        attempts.sort(key=lambda item: item.attempt.attempt_number)
+        numbers = [item.attempt.attempt_number for item in attempts]
+        if numbers != sorted(set(numbers)):
+            raise TournamentStoreError("attempt evidence identities are not unique and ordered")
+        return tuple(attempts)
+
+    def attempts_by_candidate(self, tournament_id: str) -> Mapping[str, tuple[SurvivalAttemptEvidence, ...]]:
+        campaign = self.load(tournament_id)
+        return MappingProxyType({
+            candidate_id: self.attempts_for(tournament_id, candidate_id)
+            for candidate_id in campaign.records
+        })
+
+    def finalize_attempt(self, evidence: SurvivalAttemptEvidence) -> SurvivalAttemptEvidence:
+        """Atomically publish one immutable terminal record; identical replay is idempotent."""
+        if not isinstance(evidence, SurvivalAttemptEvidence):
+            raise TournamentStoreError("attempt evidence must be SurvivalAttemptEvidence")
+        campaign = self.load(evidence.attempt.tournament_id)
+        record = campaign.records.get(evidence.attempt.candidate_id)
+        if record is None or evidence.attempt.attempt_number > record.attempt_count:
+            raise TournamentStoreError("attempt evidence does not match admitted campaign state")
+        path = self.attempt_path(
+            evidence.attempt.tournament_id,
+            evidence.attempt.candidate_id,
+            evidence.attempt.attempt_number,
+        )
+        payload = attempt_evidence_to_dict(evidence)
+        if path.is_file():
+            existing = attempt_evidence_from_dict(
+                TournamentStore._read_json(path, "survival attempt evidence")
+            )
+            if existing != evidence:
+                raise TournamentStoreError(f"immutable attempt evidence conflict: {evidence.attempt_id}")
+            return existing
+        if campaign.active_attempt != evidence.attempt:
+            raise TournamentStoreError("new attempt evidence does not match the persisted active attempt")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            with temporary.open("x", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True, allow_nan=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                existing = attempt_evidence_from_dict(
+                    TournamentStore._read_json(path, "survival attempt evidence")
+                )
+                if existing != evidence:
+                    raise TournamentStoreError(f"immutable attempt evidence conflict: {evidence.attempt_id}")
+                return existing
+        finally:
+            temporary.unlink(missing_ok=True)
+        return evidence
+
+    def recover_active_attempt(
+        self,
+        campaign: SurvivalCampaign,
+        *,
+        finished_at: datetime,
+        ownership_state: Mapping[str, object] | None = None,
+        reason: str = "admitted execution was interrupted before terminal evidence was recorded",
+    ) -> SurvivalCampaign:
+        """Finalize or reconcile an interrupted mutable attempt without duplicating history."""
+        active = campaign.active_attempt
+        if active is None:
+            return campaign
+        existing = next((
+            item for item in self.attempts_for(campaign.tournament_id, active.candidate_id)
+            if item.attempt_id == active.attempt_id
+        ), None)
+        if existing is None:
+            state = dict(ownership_state or {})
+
+            def identity(kind: str) -> tuple[int | None, float | None]:
+                pid = state.get(f"{kind}_pid")
+                started = state.get(f"{kind}_started_epoch")
+                if (
+                    isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+                    and isinstance(started, (int, float)) and not isinstance(started, bool)
+                    and math.isfinite(started) and started > 0
+                ):
+                    return pid, float(started)
+                return None, None
+
+            worker_pid, worker_started = identity("worker")
+            server_pid, server_started = identity("server")
+            self.finalize_attempt(SurvivalAttemptEvidence(
+                attempt=active,
+                evidence_state=AttemptEvidenceState.INTERRUPTED,
+                finished_at=finished_at,
+                benchmark_outcome=None,
+                benchmark_reasons=(reason,),
+                worker_pid=worker_pid,
+                worker_started_epoch=worker_started,
+                owned_ollama_pid=server_pid,
+                owned_ollama_started_epoch=server_started,
+            ))
+        records = dict(campaign.records)
+        record = records[active.candidate_id]
+        if record.outcome is SurvivalOutcome.RUNNING:
+            records[active.candidate_id] = replace(
+                record,
+                outcome=SurvivalOutcome.INTERRUPTED,
+                reason=reason,
+            )
+        return replace(campaign, records=records, active_attempt=None)
+
     def create(self, campaign: SurvivalCampaign, manifest: TournamentManifest,
                policy: SurvivalExecutionPolicy) -> SurvivalCampaign:
         if campaign.manifest_digest != manifest.digest:
@@ -383,6 +882,7 @@ class SurvivalStore:
         self.tournaments.create(base, manifest)
         TournamentStore._atomic_json(self.policy_path(campaign.tournament_id), policy_to_dict(policy))
         TournamentStore._atomic_json(self.execution_path(campaign.tournament_id), campaign_to_dict(campaign))
+        self.attempts_path(campaign.tournament_id).mkdir(exist_ok=False)
         self.append_event(campaign.tournament_id, "tournament created", campaign.created_at)
         return campaign
 

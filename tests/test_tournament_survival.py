@@ -4,6 +4,7 @@ from contextlib import redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -14,15 +15,17 @@ from ttea.benchmarking import BenchmarkOutcome, BenchmarkResult, OllamaBenchmark
 from ttea.benchmarking.ollama import OllamaRuntimeError
 from ttea.resources import ResourceDecision, ResourceRequest
 from ttea.tournament import (
-    CandidateSurvivalRecord, CandidateVariant, OllamaTournamentProvider,
+    ActiveSurvivalAttempt, AttemptEvidenceState, CandidateSurvivalRecord,
+    CandidateVariant, OllamaTournamentProvider,
     ProvisioningDeferred, ProvisioningEvidence, ProvisioningRejected,
-    ProvisioningRuntimeDelayed, ProvisioningState,
+    ProvisioningRuntimeDelayed, ProvisioningState, ResourceAdmissionEvidence,
+    SurvivalAttemptEvidence,
     SurvivalCampaign, SurvivalCampaignState,
     SurvivalExecutionPolicy, SurvivalExecutionResult, SurvivalOutcome,
     SurvivalStore, SurvivalTournamentEngine, TournamentCandidate,
-    TournamentManifest, TournamentSupervisorManager, build_survival_manifest,
+    TournamentManifest, TournamentStoreError, TournamentSupervisorManager, build_survival_manifest,
     survival_campaign_from_dict, survival_campaign_to_dict,
-    survival_report_payload,
+    survival_attempt_id, survival_report_payload, write_survival_report,
 )
 from ttea.tournament.__main__ import main as tournament_main
 from ttea.tournament.ollama_provider import DEDICATED_ENDPOINT
@@ -107,7 +110,10 @@ class FakeProvider:
         self.execute_requests.append(resource_request)
         try:
             if self.executions:
-                return self.executions.pop(0)
+                execution = self.executions.pop(0)
+                if isinstance(execution, BaseException):
+                    raise execution
+                return execution
             return SurvivalExecutionResult(benchmark(), {"cold_load_latency_seconds": 0.5,
                                                           "decode_tokens_per_second": 10.0}, True, True, True)
         finally:
@@ -144,11 +150,12 @@ class TournamentSurvivalTests(unittest.TestCase):
         source = build_survival_manifest()
         return TournamentManifest(source.candidates[:count], source.rounds, source.tasks)
 
-    def create(self, directory, *, count=1, allow=False, policy=None):
+    def create(self, directory, *, count=1, allow=False, policy=None,
+               tournament_id="survival-test"):
         manifest = self.manifest(count)
         policy = policy or SurvivalExecutionPolicy(allow_model_download=allow, resource_retry_seconds=0.5)
         campaign = SurvivalCampaign(
-            "survival-test", manifest.digest, SurvivalCampaignState.CREATED, NOW, NOW,
+            tournament_id, manifest.digest, SurvivalCampaignState.CREATED, NOW, NOW,
             NOW + timedelta(hours=6),
             {item.candidate_id: CandidateSurvivalRecord(item.candidate_id, item.variant.model)
              for item in manifest.candidates},
@@ -156,6 +163,30 @@ class TournamentSurvivalTests(unittest.TestCase):
         store = SurvivalStore(directory)
         store.create(campaign, manifest, policy)
         return store, campaign, manifest, policy
+
+    def admitted_attempt(self, campaign, candidate_id, *, attempt_number=1):
+        request = ResourceRequest(
+            workload_type=f"tournament-survival:{candidate_id}",
+            estimated_ram_bytes=1,
+            estimated_disk_bytes=0,
+            estimated_gpu_vram_bytes=1,
+            id=f"request:{candidate_id}:{attempt_number}",
+        )
+        return ActiveSurvivalAttempt(
+            survival_attempt_id(campaign.tournament_id, candidate_id, attempt_number),
+            campaign.tournament_id,
+            candidate_id,
+            attempt_number,
+            "survival_4k",
+            "survival_exact_reply",
+            NOW,
+            request,
+            ResourceAdmissionEvidence(
+                request.id,
+                ResourceDecision.ALLOW,
+                ("resource allow",),
+            ),
+        )
 
     def run_engine(self, directory, *, count=1, decisions=(), executions=()):
         store, campaign, manifest, policy = self.create(directory, count=count)
@@ -266,6 +297,22 @@ class TournamentSurvivalTests(unittest.TestCase):
         self.assertEqual(DEDICATED_ENDPOINT.base_url, "http://127.0.0.1:11435")
         self.assertNotIn("11434", DEDICATED_ENDPOINT.base_url)
 
+    def test_owned_server_identity_is_observed_when_runtime_ownership_is_recorded(self):
+        provider = self.provider(self.manifest())
+        server = Mock()
+        provider.server_factory = Mock(return_value=server)
+        state_store = Mock()
+        observed = []
+        self.assertIs(
+            provider._server(provider.benchmark_policy(), state_store, observed.append),
+            server,
+        )
+        identity = SimpleNamespace(pid=4321, started_epoch=87.5)
+        callback = provider.server_factory.call_args.kwargs["identity_callback"]
+        callback(identity)
+        state_store.record_server.assert_called_once_with(4321, 87.5)
+        self.assertEqual(observed, [identity])
+
     def test_execution_request_and_worker_forward_survival_controls(self):
         manifest = self.manifest()
         candidate, round_value, task = manifest.candidates[0], manifest.rounds[0], manifest.tasks[0]
@@ -281,12 +328,16 @@ class TournamentSurvivalTests(unittest.TestCase):
 
     def test_allow_runs_and_passes_with_cleanup_gates(self):
         with tempfile.TemporaryDirectory() as directory:
-            result, _, provider, resources = self.run_engine(directory)
-        record = next(iter(result.records.values()))
+            result, store, provider, resources = self.run_engine(directory)
+            record = next(iter(result.records.values()))
+            attempts = store.attempts_for(result.tournament_id, record.candidate_id)
         self.assertIs(record.outcome, SurvivalOutcome.PASSED)
         self.assertTrue(record.cleanup_verified)
         self.assertEqual(provider.execute_calls, [record.candidate_id])
         self.assertGreaterEqual(len(resources.calls), 1)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0].attempt.attempt_number, 1)
+        self.assertIs(attempts[0].benchmark_outcome, BenchmarkOutcome.COMPLETED)
 
     def test_delay_waits_reassesses_fresh_and_does_not_eliminate(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -307,9 +358,14 @@ class TournamentSurvivalTests(unittest.TestCase):
 
     def test_candidates_execute_sequentially_in_catalog_order(self):
         with tempfile.TemporaryDirectory() as directory:
-            result, _, provider, _ = self.run_engine(directory, count=2)
+            result, store, provider, _ = self.run_engine(directory, count=2)
+            attempts = store.attempts_by_candidate(result.tournament_id)
         self.assertEqual(provider.execute_calls, list(result.records))
         self.assertEqual(provider.maximum_concurrent, 1)
+        self.assertEqual(set(attempts), set(result.records))
+        for candidate_id, candidate_attempts in attempts.items():
+            self.assertEqual(len(candidate_attempts), 1)
+            self.assertEqual(candidate_attempts[0].attempt.candidate_id, candidate_id)
 
     def test_cleanup_failure_is_hard_elimination(self):
         failed_cleanup = SurvivalExecutionResult(benchmark(), {}, False, True, True)
@@ -702,7 +758,8 @@ class TournamentSurvivalTests(unittest.TestCase):
                 ("available RAM remained below the reserved RAM threshold",),
                 NOW, NOW + timedelta(seconds=1), 321, None, True,
             ),
-            {"sample": 1}, True, True, True,
+            {"sample": 1, "ram_minimum_available_bytes": 111}, True, True, True,
+            9001, 10.5,
         )
         second = SurvivalExecutionResult(
             BenchmarkResult(
@@ -710,13 +767,18 @@ class TournamentSurvivalTests(unittest.TestCase):
                 ("runtime RAM reserve crossed again",),
                 NOW, NOW + timedelta(seconds=1), 654, None, True,
             ),
-            {"sample": 2}, True, True, True,
+            {"sample": 2, "ram_minimum_available_bytes": 222}, True, True, True,
+            9002, 20.5,
         )
         with tempfile.TemporaryDirectory() as directory:
-            result, _, provider, _ = self.run_engine(
+            result, store, provider, _ = self.run_engine(
                 directory, executions=(first, second),
             )
-        record = next(iter(result.records.values()))
+            record = next(iter(result.records.values()))
+            attempts = store.attempts_for(result.tournament_id, record.candidate_id)
+            report = json.loads(
+                store.tournaments.report_json_path(result.tournament_id).read_text(encoding="utf-8")
+            )
         self.assertIs(record.outcome, SurvivalOutcome.ELIMINATED)
         self.assertEqual(record.attempt_count, 2)
         self.assertEqual(len(provider.execute_calls), 2)
@@ -729,6 +791,19 @@ class TournamentSurvivalTests(unittest.TestCase):
         self.assertTrue(record.cleanup_verified)
         self.assertTrue(record.resource_recovery_verified)
         self.assertTrue(record.default_server_identity_preserved)
+        self.assertEqual([item.attempt.attempt_number for item in attempts], [1, 2])
+        self.assertEqual([item.metrics["ram_minimum_available_bytes"] for item in attempts], [111, 222])
+        self.assertEqual([item.worker_pid for item in attempts], [321, 654])
+        self.assertEqual([item.owned_ollama_pid for item in attempts], [9001, 9002])
+        self.assertEqual([item.owned_ollama_started_epoch for item in attempts], [10.5, 20.5])
+        self.assertTrue(all(item.cleanup_verified for item in attempts))
+        self.assertTrue(all(item.resource_recovery_verified for item in attempts))
+        self.assertTrue(all(item.default_server_identity_preserved for item in attempts))
+        self.assertEqual(report["candidates"][0]["survival_outcome"], record.outcome.value)
+        self.assertEqual(
+            len(report["attempt_evidence"]["by_candidate"][record.candidate_id]),
+            2,
+        )
 
     def test_repeated_pressure_eliminates_first_then_scheduler_runs_second(self):
         pressure = SurvivalExecutionResult(
@@ -752,32 +827,448 @@ class TournamentSurvivalTests(unittest.TestCase):
         )
         success = SurvivalExecutionResult(benchmark(), {}, True, True, True)
         with tempfile.TemporaryDirectory() as directory:
-            result, _, provider, resources = self.run_engine(
+            result, store, provider, resources = self.run_engine(
                 directory,
                 decisions=(ResourceDecision.DELAY, ResourceDecision.ALLOW, ResourceDecision.ALLOW),
                 executions=(pressure, success),
             )
-        record = next(iter(result.records.values()))
+            record = next(iter(result.records.values()))
+            attempts = store.attempts_for(result.tournament_id, record.candidate_id)
         self.assertIs(record.outcome, SurvivalOutcome.PASSED)
         self.assertEqual(record.attempt_count, 2)
         self.assertEqual(len(provider.execute_calls), 2)
         self.assertEqual(len(provider.provision_calls), 1)
         self.assertEqual(len(resources.calls), 3)
+        self.assertEqual([item.attempt.attempt_number for item in attempts], [1, 2])
 
     def test_worker_failure_retry_semantics_remain_two_attempts(self):
         failure = SurvivalExecutionResult(
-            benchmark(BenchmarkOutcome.WORKER_FAILURE), {}, True, True, True,
+            BenchmarkResult(BenchmarkOutcome.WORKER_FAILURE, ("worker failed",), NOW,
+                            NOW + timedelta(seconds=1), 401, None, True),
+            {"sample": "failure"}, True, True, True,
         )
-        success = SurvivalExecutionResult(benchmark(), {}, True, True, True)
+        success = SurvivalExecutionResult(
+            BenchmarkResult(BenchmarkOutcome.COMPLETED, ("completed",), NOW,
+                            NOW + timedelta(seconds=1), 402, None, True),
+            {"sample": "success"}, True, True, True,
+        )
         with tempfile.TemporaryDirectory() as directory:
-            result, _, provider, _ = self.run_engine(
+            result, store, provider, _ = self.run_engine(
                 directory, executions=(failure, success),
             )
-        record = next(iter(result.records.values()))
+            record = next(iter(result.records.values()))
+            attempts = store.attempts_for(result.tournament_id, record.candidate_id)
         self.assertIs(record.outcome, SurvivalOutcome.PASSED)
         self.assertEqual(record.attempt_count, 2)
         self.assertEqual(len(provider.execute_calls), 2)
         self.assertEqual(len(provider.provision_calls), 1)
+        self.assertEqual([item.worker_pid for item in attempts], [401, 402])
+        self.assertEqual([item.metrics["sample"] for item in attempts], ["failure", "success"])
+        self.assertEqual(
+            [item.benchmark_outcome for item in attempts],
+            [BenchmarkOutcome.WORKER_FAILURE, BenchmarkOutcome.COMPLETED],
+        )
+
+    def test_delay_cycles_create_no_evidence_until_first_admitted_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, campaign, manifest, policy = self.create(directory)
+            observed_counts = []
+
+            class ObservingResources(FakeResourceManager):
+                def assess(inner_self, request):
+                    assessment = super().assess(request)
+                    if assessment.decision is ResourceDecision.DELAY:
+                        observed_counts.append(len(store.attempts_for(
+                            campaign.tournament_id,
+                            manifest.candidates[0].candidate_id,
+                        )))
+                    return assessment
+
+            resources = ObservingResources((
+                ResourceDecision.DELAY,
+                ResourceDecision.DELAY,
+                ResourceDecision.ALLOW,
+            ))
+            provider = FakeProvider(manifest, resources, policy)
+            clock = Clock()
+            result = SurvivalTournamentEngine(
+                campaign.tournament_id,
+                store,
+                provider,
+                now=clock.now,
+                sleep=clock.sleep,
+            ).run()
+            candidate_id = manifest.candidates[0].candidate_id
+            attempts = store.attempts_for(result.tournament_id, candidate_id)
+
+        self.assertEqual(observed_counts, [0, 0])
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0].attempt.attempt_number, 1)
+
+    def test_attempt_preserves_admission_identity_metrics_and_cleanup_details(self):
+        metric_bundle = {
+            "ram_available_before_bytes": 900,
+            "ram_minimum_available_bytes": 700,
+            "ram_transient_delta_bytes": 200,
+            "gpu_free_vram_before_bytes": 600,
+            "gpu_minimum_free_vram_bytes": 500,
+            "gpu_transient_vram_delta_bytes": 100,
+            "max_gpu_temperature_c": 61.5,
+            "wall_clock_duration_seconds": 1.0,
+            "decode_tokens_per_second": 12.5,
+            "response_is_string": True,
+            "model_unload_confirmed": True,
+            "server_shutdown_confirmed": True,
+            "dedicated_port_closed": True,
+            "runtime_state_absent": True,
+        }
+
+        class RichResources(FakeResourceManager):
+            def assess(inner_self, request):
+                inner_self.calls.append(request)
+                return SimpleNamespace(
+                    decision=ResourceDecision.ALLOW,
+                    reasons=("resource allow",),
+                    snapshot_timestamp=NOW,
+                    ram_required_bytes=1,
+                    ram_available_bytes=900,
+                    ram_reserved_bytes=100,
+                    ram_headroom_bytes=799,
+                    disk_required_bytes=0,
+                    disk_free_bytes=800,
+                    disk_reserved_bytes=100,
+                    disk_headroom_bytes=700,
+                    selected_gpu_index=0,
+                    gpu_total_vram_bytes=1_000,
+                    gpu_free_vram_bytes=600,
+                    gpu_reserved_vram_bytes=100,
+                    gpu_headroom_bytes=499,
+                    gpu_temperature_c=55.5,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store, campaign, manifest, policy = self.create(directory)
+            result_value = SurvivalExecutionResult(
+                BenchmarkResult(
+                    BenchmarkOutcome.COMPLETED,
+                    ("completed",),
+                    NOW,
+                    NOW + timedelta(seconds=1),
+                    7303,
+                    None,
+                    True,
+                    None,
+                    13.5,
+                ),
+                metric_bundle,
+                True,
+                True,
+                True,
+                7404,
+                14.5,
+            )
+            provider = FakeProvider(manifest, RichResources(), policy, (result_value,))
+            result = SurvivalTournamentEngine(
+                campaign.tournament_id,
+                store,
+                provider,
+                now=Clock().now,
+                sleep=lambda _seconds: None,
+            ).run()
+            candidate_id = manifest.candidates[0].candidate_id
+            attempt = store.attempts_for(result.tournament_id, candidate_id)[0]
+
+        self.assertEqual(dict(attempt.metrics), metric_bundle)
+        self.assertEqual(attempt.attempt.resource_request, provider.execute_requests[0])
+        self.assertIs(attempt.attempt.admission.decision, ResourceDecision.ALLOW)
+        self.assertEqual(attempt.attempt.admission.snapshot_timestamp, NOW)
+        self.assertEqual(attempt.attempt.admission.ram_available_bytes, 900)
+        self.assertEqual(attempt.attempt.admission.gpu_temperature_c, 55.5)
+        self.assertEqual((attempt.worker_pid, attempt.worker_started_epoch), (7303, 13.5))
+        self.assertEqual((attempt.owned_ollama_pid, attempt.owned_ollama_started_epoch), (7404, 14.5))
+        self.assertTrue(attempt.response_valid)
+        self.assertTrue(attempt.cleanup_verified)
+        self.assertTrue(attempt.resource_recovery_verified)
+        self.assertTrue(attempt.default_server_identity_preserved)
+
+    def test_interrupted_execution_finalizes_the_admitted_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result, store, _, _ = self.run_engine(
+                directory,
+                executions=(KeyboardInterrupt(),),
+            )
+            candidate_id = next(iter(result.records))
+            attempts = store.attempts_for(result.tournament_id, candidate_id)
+
+        self.assertIs(result.state, SurvivalCampaignState.INTERRUPTED)
+        self.assertIsNone(result.active_attempt)
+        self.assertEqual(len(attempts), 1)
+        self.assertIs(attempts[0].evidence_state, AttemptEvidenceState.INTERRUPTED)
+        self.assertEqual(attempts[0].attempt.attempt_number, 1)
+        self.assertIsNone(attempts[0].benchmark_outcome)
+
+    def test_recovery_captures_owned_identities_and_does_not_duplicate_finalized_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, campaign, manifest, _ = self.create(directory)
+            candidate_id = manifest.candidates[0].candidate_id
+            active = self.admitted_attempt(campaign, candidate_id)
+            running_record = replace(
+                campaign.records[candidate_id],
+                outcome=SurvivalOutcome.RUNNING,
+                attempt_count=1,
+            )
+            running = store.save(replace(
+                campaign,
+                state=SurvivalCampaignState.RUNNING,
+                records={candidate_id: running_record},
+                current_candidate_id=candidate_id,
+                current_round_id=active.round_id,
+                updated_at=NOW + timedelta(seconds=1),
+                active_attempt=active,
+            ))
+            recovered = store.recover_active_attempt(
+                running,
+                finished_at=NOW + timedelta(seconds=2),
+                ownership_state={
+                    "worker_pid": 7101,
+                    "worker_started_epoch": 11.5,
+                    "server_pid": 7202,
+                    "server_started_epoch": 12.5,
+                },
+            )
+            store.save(replace(recovered, updated_at=NOW + timedelta(seconds=2)))
+            first = store.attempts_for(campaign.tournament_id, candidate_id)
+            recovered_again = store.recover_active_attempt(
+                running,
+                finished_at=NOW + timedelta(seconds=3),
+            )
+            second = store.attempts_for(campaign.tournament_id, candidate_id)
+
+        self.assertIsNone(recovered.active_attempt)
+        self.assertIsNone(recovered_again.active_attempt)
+        self.assertEqual(first, second)
+        self.assertEqual(len(second), 1)
+        self.assertEqual((second[0].worker_pid, second[0].worker_started_epoch), (7101, 11.5))
+        self.assertEqual(
+            (second[0].owned_ollama_pid, second[0].owned_ollama_started_epoch),
+            (7202, 12.5),
+        )
+
+    def test_status_and_resume_do_not_duplicate_an_already_finalized_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, campaign, manifest, _ = self.create(directory)
+            candidate_id = manifest.candidates[0].candidate_id
+            active = self.admitted_attempt(campaign, candidate_id)
+            running_record = replace(
+                campaign.records[candidate_id],
+                outcome=SurvivalOutcome.RUNNING,
+                attempt_count=1,
+            )
+            store.save(replace(
+                campaign,
+                state=SurvivalCampaignState.RUNNING,
+                records={candidate_id: running_record},
+                current_candidate_id=candidate_id,
+                current_round_id=active.round_id,
+                updated_at=NOW + timedelta(seconds=1),
+                active_attempt=active,
+            ))
+            terminal = SurvivalAttemptEvidence(
+                active,
+                AttemptEvidenceState.FINALIZED,
+                NOW + timedelta(seconds=2),
+                BenchmarkOutcome.RESOURCE_PRESSURE,
+                ("runtime pressure",),
+                metrics={"ram_minimum_available_bytes": 123},
+                cleanup_verified=True,
+                resource_recovery_verified=True,
+                default_server_identity_preserved=True,
+            )
+            store.finalize_attempt(terminal)
+            manager = TournamentSupervisorManager(
+                store,
+                benchmark_state_path=Path(directory) / "benchmark.json",
+                process_api=lambda _pid: SimpleNamespace(create_time=lambda: 1.0),
+            )
+            manager.process_matches = lambda _pid, _started: False
+            manager._spawn = lambda value: value
+            manager.status(campaign.tournament_id)
+            manager.status(campaign.tournament_id)
+            resumed = manager.resume(campaign.tournament_id)
+            attempts = store.attempts_for(campaign.tournament_id, candidate_id)
+
+        self.assertIs(resumed.state, SurvivalCampaignState.CREATED)
+        self.assertEqual(attempts, (terminal,))
+
+    def test_campaign_attempt_evidence_isolated_for_same_candidate_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            results = []
+            for tournament_id, minimum in (("campaign-a", 101), ("campaign-b", 202)):
+                store, campaign, manifest, policy = self.create(
+                    directory,
+                    tournament_id=tournament_id,
+                )
+                provider = FakeProvider(
+                    manifest,
+                    FakeResourceManager(),
+                    policy,
+                    executions=(SurvivalExecutionResult(
+                        benchmark(),
+                        {"ram_minimum_available_bytes": minimum},
+                        True,
+                        True,
+                        True,
+                    ),),
+                )
+                result = SurvivalTournamentEngine(
+                    campaign.tournament_id,
+                    store,
+                    provider,
+                    now=Clock().now,
+                    sleep=lambda _seconds: None,
+                ).run()
+                candidate_id = manifest.candidates[0].candidate_id
+                results.append(store.attempts_for(result.tournament_id, candidate_id))
+
+        self.assertEqual(results[0][0].metrics["ram_minimum_available_bytes"], 101)
+        self.assertEqual(results[1][0].metrics["ram_minimum_available_bytes"], 202)
+        self.assertNotEqual(results[0][0].attempt.tournament_id, results[1][0].attempt.tournament_id)
+
+    def test_historical_campaign_without_attempt_schema_loads_and_reports_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, campaign, manifest, _ = self.create(directory)
+            store.attempts_path(campaign.tournament_id).rmdir()
+            execution_path = store.execution_path(campaign.tournament_id)
+            raw = json.loads(execution_path.read_text(encoding="utf-8"))
+            raw.pop("active_attempt")
+            execution_path.write_text(json.dumps(raw), encoding="utf-8")
+
+            loaded = store.load(campaign.tournament_id)
+            self.assertFalse(store.attempt_evidence_available(campaign.tournament_id))
+            self.assertEqual(
+                store.attempts_for(campaign.tournament_id, manifest.candidates[0].candidate_id),
+                (),
+            )
+            write_survival_report(store, loaded, manifest)
+            report = json.loads(
+                store.tournaments.report_json_path(campaign.tournament_id).read_text(encoding="utf-8")
+            )
+            watcher = TournamentWatcher(Path(directory), resource_manager=Mock())
+            rendered_watch = TournamentWatchRenderer().render(watcher.snapshot())
+
+        self.assertIsNone(loaded.active_attempt)
+        self.assertFalse(report["attempt_evidence"]["available"])
+        self.assertEqual(report["attempt_evidence"]["by_candidate"][manifest.candidates[0].candidate_id], [])
+        self.assertIn("ROUND 1 RESULTS", rendered_watch)
+
+    def test_finalized_attempt_publication_is_idempotent_but_conflicts_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, campaign, manifest, _ = self.create(directory)
+            candidate_id = manifest.candidates[0].candidate_id
+            active = self.admitted_attempt(campaign, candidate_id)
+            running_record = replace(
+                campaign.records[candidate_id],
+                outcome=SurvivalOutcome.RUNNING,
+                attempt_count=1,
+            )
+            store.save(replace(
+                campaign,
+                state=SurvivalCampaignState.RUNNING,
+                records={candidate_id: running_record},
+                current_candidate_id=candidate_id,
+                current_round_id=active.round_id,
+                updated_at=NOW + timedelta(seconds=1),
+                active_attempt=active,
+            ))
+            terminal = SurvivalAttemptEvidence(
+                active,
+                AttemptEvidenceState.FINALIZED,
+                NOW + timedelta(seconds=2),
+                BenchmarkOutcome.COMPLETED,
+                ("completed",),
+                metrics={"ram_minimum_available_bytes": 111},
+                cleanup_verified=True,
+                resource_recovery_verified=True,
+                default_server_identity_preserved=True,
+            )
+            store.finalize_attempt(terminal)
+            self.assertEqual(store.finalize_attempt(terminal), terminal)
+            with self.assertRaisesRegex(TournamentStoreError, "immutable attempt evidence conflict"):
+                store.finalize_attempt(replace(
+                    terminal,
+                    metrics={"ram_minimum_available_bytes": 999},
+                ))
+
+    def test_attempt_models_reject_malformed_identity_state_timestamps_and_process_pairs(self):
+        manifest = self.manifest()
+        candidate_id = manifest.candidates[0].candidate_id
+        campaign = SurvivalCampaign(
+            "validation-test", manifest.digest, SurvivalCampaignState.CREATED, NOW, NOW,
+            NOW + timedelta(hours=1),
+            {candidate_id: CandidateSurvivalRecord(candidate_id, manifest.candidates[0].variant.model)},
+        )
+        active = self.admitted_attempt(campaign, candidate_id)
+        terminal = SurvivalAttemptEvidence(
+            active,
+            AttemptEvidenceState.FINALIZED,
+            NOW + timedelta(seconds=1),
+            BenchmarkOutcome.COMPLETED,
+            ("completed",),
+        )
+
+        with self.assertRaises(ValueError):
+            replace(active, attempt_number=0)
+        with self.assertRaises(ValueError):
+            replace(active, attempt_id="wrong-attempt-identity")
+        with self.assertRaises(ValueError):
+            replace(
+                campaign,
+                state=SurvivalCampaignState.RUNNING,
+                records={candidate_id: replace(
+                    campaign.records[candidate_id],
+                    outcome=SurvivalOutcome.RUNNING,
+                    attempt_count=1,
+                )},
+                current_candidate_id="another-candidate",
+                current_round_id=active.round_id,
+                active_attempt=active,
+            )
+        with self.assertRaises(ValueError):
+            replace(terminal, finished_at=NOW - timedelta(seconds=1))
+        with self.assertRaises(ValueError):
+            replace(terminal, worker_started_epoch=1.0)
+        with self.assertRaises(ValueError):
+            replace(terminal, worker_pid=0)
+        with self.assertRaises(ValueError):
+            replace(terminal, worker_pid=123, worker_started_epoch=float("nan"))
+
+    def test_nonfinite_attempt_metric_is_rejected_before_persistence(self):
+        manifest = self.manifest()
+        candidate_id = manifest.candidates[0].candidate_id
+        campaign = SurvivalCampaign(
+            "validation-test", manifest.digest, SurvivalCampaignState.CREATED, NOW, NOW,
+            NOW + timedelta(hours=1),
+            {candidate_id: CandidateSurvivalRecord(candidate_id, manifest.candidates[0].variant.model)},
+        )
+        active = self.admitted_attempt(campaign, candidate_id)
+        with self.assertRaises(ValueError):
+            SurvivalAttemptEvidence(
+                active,
+                AttemptEvidenceState.FINALIZED,
+                NOW + timedelta(seconds=1),
+                BenchmarkOutcome.COMPLETED,
+                ("completed",),
+                metrics={"max_gpu_temperature_c": float("nan")},
+            )
+
+    def test_generic_base_record_is_not_authoritative_survival_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result, store, _, _ = self.run_engine(directory)
+            base = store.tournaments.load(result.tournament_id)
+
+        self.assertIs(result.state, SurvivalCampaignState.COMPLETED)
+        self.assertEqual(base.state.value, "CREATED")
+        self.assertEqual(base.progress_completed, 0)
 
 
 if __name__ == "__main__":

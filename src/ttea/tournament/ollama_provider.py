@@ -78,6 +78,8 @@ class SurvivalExecutionResult:
     cleanup_verified: bool
     resource_recovery_verified: bool
     default_server_identity_preserved: bool
+    owned_ollama_pid: int | None = None
+    owned_ollama_started_epoch: float | None = None
 
 
 @dataclass
@@ -239,10 +241,16 @@ class OllamaTournamentProvider(TournamentProvider):
             raise ProvisioningRejected("exact model remains absent after authorized pull")
         return verified
 
-    def _server(self, policy: BenchmarkSafetyPolicy, state_store: BenchmarkStateStore) -> OwnedOllamaServer:
+    def _server(self, policy: BenchmarkSafetyPolicy, state_store: BenchmarkStateStore,
+                identity_observer: Callable[[Any], None] | None = None) -> OwnedOllamaServer:
+        def record_identity(identity) -> None:
+            state_store.record_server(identity.pid, identity.started_epoch)
+            if identity_observer is not None:
+                identity_observer(identity)
+
         return self.server_factory(
             DEDICATED_ENDPOINT, policy, executable=self.executable,
-            identity_callback=lambda identity: state_store.record_server(identity.pid, identity.started_epoch),
+            identity_callback=record_identity,
         )
 
     def provision(self, candidate: TournamentCandidate,
@@ -298,7 +306,13 @@ class OllamaTournamentProvider(TournamentProvider):
         policy = self.benchmark_policy()
         state_store = BenchmarkStateStore(self.state_path)
         state_store.acquire()
-        server = self._server(policy, state_store)
+        owned_identity = None
+
+        def observe_identity(identity) -> None:
+            nonlocal owned_identity
+            owned_identity = identity
+
+        server = self._server(policy, state_store, observe_identity)
         cleanup = None
         handed_off = False
         before = after = None
@@ -407,4 +421,12 @@ class OllamaTournamentProvider(TournamentProvider):
                 "prompt_eval_count": generated.prompt_eval_count,
                 "decode_tokens_per_second": decode_rate,
             })
-        return SurvivalExecutionResult(benchmark, metrics, cleanup_verified, recovered, default_preserved)
+        return SurvivalExecutionResult(
+            benchmark,
+            metrics,
+            cleanup_verified,
+            recovered,
+            default_preserved,
+            None if owned_identity is None else owned_identity.pid,
+            None if owned_identity is None else owned_identity.started_epoch,
+        )

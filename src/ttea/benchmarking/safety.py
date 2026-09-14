@@ -106,7 +106,7 @@ class BenchmarkStateStore:
         except FileExistsError as error:
             raise RuntimeError("benchmark state was acquired concurrently") from error
 
-    def record_worker(self, pid: int) -> None:
+    def record_worker(self, pid: int) -> float:
         process_started = psutil.Process(pid).create_time()
         state = self._read() or {}
         if state.get("supervisor_pid") != os.getpid() or not self.process_matches(state.get("supervisor_pid"), state.get("supervisor_started_epoch")):
@@ -115,6 +115,7 @@ class BenchmarkStateStore:
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
         temporary.replace(self.path)
+        return process_started
 
     def record_server(self, pid: int, started_epoch: float) -> None:
         if not self.process_matches(pid, started_epoch):

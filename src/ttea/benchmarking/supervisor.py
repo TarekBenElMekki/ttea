@@ -131,6 +131,7 @@ class BenchmarkSupervisor:
             raise RuntimeError("this supervisor already owns an active benchmark")
         started_at = datetime.now(timezone.utc)
         worker_pid = None
+        worker_started_epoch = None
         outcome, reasons = BenchmarkOutcome.WORKER_FAILURE, ("benchmark did not start",)
         worker_result = None
         worker_started = False
@@ -154,7 +155,7 @@ class BenchmarkSupervisor:
             request_deadline = time.monotonic() + self.policy.request_timeout_seconds
             self._active_process = process
             worker_pid = process.pid
-            self.state_store.record_worker(worker_pid)
+            worker_started_epoch = self.state_store.record_worker(worker_pid)
             ram_violations = vram_violations = 0
             while True:
                 try:
@@ -245,4 +246,4 @@ class BenchmarkSupervisor:
         if outcome is not BenchmarkOutcome.TIMEOUT:
             timeout_kind = None
         return BenchmarkResult(outcome, reasons, started_at, datetime.now(timezone.utc), worker_pid, worker_result,
-                               worker_started, timeout_kind)
+                               worker_started, timeout_kind, worker_started_epoch)

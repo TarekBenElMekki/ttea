@@ -102,6 +102,12 @@ class TournamentSupervisorManager:
         if active is not None and self.process_matches(active.supervisor_pid, active.supervisor_started_epoch):
             raise RuntimeError(f"active tournament {active.tournament_id} already owns supervision")
         if active is not None:
+            active = self.store.recover_active_attempt(
+                active,
+                finished_at=utc_now(),
+                ownership_state=BenchmarkStateStore(self.benchmark_state_path).snapshot(),
+                reason="stale supervisor interrupted an admitted execution",
+            )
             stale_records = {
                 key: (replace(value, outcome=SurvivalOutcome.INTERRUPTED,
                               reason="stale running attempt recovered")
@@ -147,6 +153,12 @@ class TournamentSupervisorManager:
         alive = campaign.state in ACTIVE_SURVIVAL_STATES and self.process_matches(
             campaign.supervisor_pid, campaign.supervisor_started_epoch)
         if campaign.state in ACTIVE_SURVIVAL_STATES and not alive:
+            campaign = self.store.recover_active_attempt(
+                campaign,
+                finished_at=utc_now(),
+                ownership_state=BenchmarkStateStore(self.benchmark_state_path).snapshot(),
+                reason="stale supervisor interrupted an admitted execution",
+            )
             records = {
                 key: (replace(value, outcome=SurvivalOutcome.INTERRUPTED,
                               reason="stale running attempt recovered")
@@ -169,6 +181,14 @@ class TournamentSupervisorManager:
             raise RuntimeError("active tournament cannot be resumed twice")
         if campaign.state is not SurvivalCampaignState.INTERRUPTED:
             raise RuntimeError(f"tournament in state {campaign.state.value} is not resumable")
+        if campaign.active_attempt is not None:
+            campaign = self.store.recover_active_attempt(
+                campaign,
+                finished_at=utc_now(),
+                ownership_state=BenchmarkStateStore(self.benchmark_state_path).snapshot(),
+                reason="resume recovered an interrupted admitted execution",
+            )
+            campaign = self.store.save(replace(campaign, updated_at=utc_now()))
         # This acquire/release pair reclaims only stale ownership. Any verified
         # live worker/server identity blocks resume and is never guessed away.
         guard = BenchmarkStateStore(self.benchmark_state_path)
@@ -227,9 +247,19 @@ class TournamentSupervisorManager:
                             for kind in ("worker", "server"))
         latest = self.store.load(campaign.tournament_id)
         if latest.state in ACTIVE_SURVIVAL_STATES:
+            latest = self.store.recover_active_attempt(
+                latest,
+                finished_at=utc_now(),
+                ownership_state=state,
+                reason="cancellation interrupted an admitted execution",
+            )
             terminal = SurvivalCampaignState.INTERRUPTED if owned_remains else SurvivalCampaignState.CANCELLED
             records = dict(latest.records)
-            if latest.current_candidate_id and records[latest.current_candidate_id].outcome is SurvivalOutcome.RUNNING:
+            if (
+                latest.current_candidate_id
+                and records[latest.current_candidate_id].outcome
+                in {SurvivalOutcome.RUNNING, SurvivalOutcome.INTERRUPTED}
+            ):
                 records[latest.current_candidate_id] = replace(
                     records[latest.current_candidate_id],
                     outcome=SurvivalOutcome.INTERRUPTED if owned_remains else SurvivalOutcome.CANCELLED,
@@ -264,6 +294,12 @@ def supervise_tournament(tournament_id: str, claim_token: str,
         try:
             campaign = store.load(tournament_id)
             if campaign.supervisor_pid == os.getpid() or campaign.supervisor_claim_token == claim_token:
+                campaign = store.recover_active_attempt(
+                    campaign,
+                    finished_at=utc_now(),
+                    ownership_state=BenchmarkStateStore(DEFAULT_BENCHMARK_STATE).snapshot(),
+                    reason=f"supervisor interrupted admitted execution: {type(exc).__name__}: {exc}",
+                )
                 failed = replace(campaign, state=SurvivalCampaignState.INTERRUPTED,
                                  updated_at=utc_now(), heartbeat_at=utc_now(),
                                  last_event="supervisor interrupted",

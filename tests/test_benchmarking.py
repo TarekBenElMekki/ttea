@@ -155,6 +155,8 @@ class BenchmarkingTests(unittest.TestCase):
         self.assertEqual(result.outcome, BenchmarkOutcome.COMPLETED)
         self.assertEqual(result.worker_result, ("structured", 7))
         self.assertTrue(result.worker_started)
+        self.assertIsNotNone(result.worker_started_epoch)
+        self.assertGreater(result.worker_started_epoch, 0)
 
     def test_slow_child_bootstrap_does_not_consume_model_timeout(self):
         result, clock, _, _ = self.scripted_run(

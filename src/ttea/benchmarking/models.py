@@ -72,6 +72,7 @@ class BenchmarkResult:
     worker_result: object | None = None
     worker_started: bool = False
     timeout_kind: str | None = None
+    worker_started_epoch: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, BenchmarkOutcome):
@@ -92,3 +93,7 @@ class BenchmarkResult:
             raise ValueError("timeout_kind is valid only for a TIMEOUT outcome")
         if self.timeout_kind == "model" and not self.worker_started:
             raise ValueError("a model timeout requires a started worker")
+        if self.worker_started_epoch is not None:
+            _positive_number(self.worker_started_epoch, "worker_started_epoch")
+            if self.worker_pid is None:
+                raise ValueError("worker_started_epoch requires worker_pid")
