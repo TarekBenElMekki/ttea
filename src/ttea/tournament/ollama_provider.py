@@ -51,6 +51,29 @@ def survival_resource_request(candidate: TournamentCandidate) -> ResourceRequest
         estimated_gpu_vram_bytes=SURVIVAL_GPU_HEADROOM_BYTES,
     )
 
+def _resources_recovered(before, after, gpu_index: int | None) -> bool:
+    selected_before = next((gpu for gpu in before.gpus if gpu.index == gpu_index), None)
+    selected_after = next((gpu for gpu in after.gpus if gpu.index == gpu_index), None)
+    gpu_before = None if selected_before is None else selected_before.free_vram_bytes
+    gpu_after = None if selected_after is None else selected_after.free_vram_bytes
+    ram_delta = after.available_ram_bytes - before.available_ram_bytes
+    gpu_delta = None if gpu_before is None or gpu_after is None else gpu_after - gpu_before
+    ram_tolerance = max(256 * 1024 * 1024, int(before.available_ram_bytes * 0.05))
+    gpu_tolerance = None if gpu_before is None else max(128 * 1024 * 1024, int(gpu_before * 0.05))
+    return ram_delta >= -ram_tolerance and (gpu_delta is None or gpu_delta >= -(gpu_tolerance or 0))
+
+
+def _wait_for_resource_recovery(resource_manager, before, gpu_index: int | None, *, sleep, settle_seconds: float, attempts: int = 5):
+    if attempts <= 0:
+        raise ValueError("attempts must be positive")
+    after = None
+    for _ in range(attempts):
+        sleep(settle_seconds)
+        after = resource_manager.current_budget()
+        if _resources_recovered(before, after, gpu_index):
+            break
+    return after
+
 
 class ProvisioningDeferred(RuntimeError):
     """A missing candidate cannot be acquired under the persisted policy."""
@@ -386,8 +409,13 @@ class OllamaTournamentProvider(TournamentProvider):
                 temperature=request.temperature, keep_alive=request.keep_alive,
             )
             benchmark = supervisor.run(worker, resource_request)
-            self.sleep(self.settle_seconds)
-            after = self.resource_manager.current_budget()
+            after = _wait_for_resource_recovery(
+                self.resource_manager,
+                before,
+                resource_request.gpu_index,
+                sleep=self.sleep,
+                settle_seconds=self.settle_seconds,
+            )
         finally:
             if not handed_off:
                 try:
