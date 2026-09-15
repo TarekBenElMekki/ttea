@@ -125,6 +125,9 @@ def _result_from_dict(x:dict[str,Any])->CapabilityEvaluationResult:
         x["graded_measurements"],x.get("parsed_response"),
     )
 
+def _atomic_temp_path(path:Path)->Path:
+    return path.with_name(".tmp-"+uuid4().hex)
+
 class CapabilityWorkStore:
     def __init__(self,root:Path|str):self.root=Path(root)
     def _dir(self,w:CapabilityWorkId)->Path:return self.root/w.tournament_id/"capability"/w.key
@@ -135,7 +138,7 @@ class CapabilityWorkStore:
         if immutable and path.exists():
             if path.read_bytes()!=encoded:raise CapabilityStoreError("immutable capability evidence conflict")
             return
-        tmp=path.with_name("."+path.name+"."+uuid4().hex+".tmp")
+        tmp=_atomic_temp_path(path)
         try:
             with tmp.open("xb") as h:h.write(encoded);h.flush();os.fsync(h.fileno())
             if immutable:
